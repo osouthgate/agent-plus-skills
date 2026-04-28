@@ -35,8 +35,8 @@ Adds `hcloud-remote` to PATH and loads the skill so Claude reaches for it automa
 ### Session-only (dev / try-before-install)
 
 ```bash
-git clone https://github.com/osouthgate/agent-plus
-claude --plugin-dir ./agent-plus/hcloud-remote
+git clone https://github.com/osouthgate/agent-plus-skills
+claude --plugin-dir ./agent-plus-skills/hcloud-remote
 ```
 
 `--plugin-dir` loads for the current shell only; nothing persisted.
@@ -44,7 +44,7 @@ claude --plugin-dir ./agent-plus/hcloud-remote
 ### Standalone — no Claude Code
 
 ```bash
-curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/hcloud-remote/bin/hcloud-remote
+curl -O https://raw.githubusercontent.com/osouthgate/agent-plus-skills/main/hcloud-remote/bin/hcloud-remote
 chmod +x hcloud-remote
 ./hcloud-remote server list
 ```
