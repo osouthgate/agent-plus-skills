@@ -1,0 +1,10 @@
+{
+  "name": "agent-plus-skills",
+  "owner": "osouthgate",
+  "version": "0.1.0",
+  "agent_plus_version": ">=0.5",
+  "surface": "claude-code",
+  "skills": [],
+  "homepage": "https://github.com/osouthgate/agent-plus-skills",
+  "license": "MIT"
+}
