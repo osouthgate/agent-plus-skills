@@ -25,3 +25,38 @@ jobs:
             echo "=== $plugin_dir ==="
             python -m unittest discover -s "$plugin" -v
           done
+
+  envelope-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: marketplace
+      - uses: actions/checkout@v4
+        with:
+          repository: osouthgate/agent-plus
+          path: framework
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Stage plugins for envelope contract
+        run: |
+          mkdir -p plugins
+          # Marketplace plugins (this repo).
+          for d in marketplace/*/.claude-plugin; do
+            plugin_dir=$(dirname "$d")
+            name=$(basename "$plugin_dir")
+            cp -r "$plugin_dir" "plugins/$name"
+          done
+          # Framework plugins (companion repo).
+          for p in agent-plus repo-analyze diff-summary skill-feedback; do
+            if [ -d "framework/$p" ] && [ ! -d "plugins/$p" ]; then
+              cp -r "framework/$p" "plugins/$p"
+            fi
+          done
+          ls plugins
+      - name: Run envelope contract probes
+        env:
+          AGENT_PLUS_PLUGINS_DIR: ${{ github.workspace }}/plugins
+        run: |
+          python -m unittest framework/agent-plus/test/contract/test_envelope_contract.py -v
