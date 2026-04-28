@@ -4,7 +4,50 @@
   "version": "0.1.0",
   "agent_plus_version": ">=0.5",
   "surface": "claude-code",
-  "skills": [],
+  "skills": [
+    {
+      "name": "coolify-remote",
+      "version": "0.3.0",
+      "path": "coolify-remote/",
+      "obviates": [
+        "deploy to coolify",
+        "set the env var on coolify",
+        "change the domain",
+        "enable https on coolify",
+        "redeploy the app",
+        "sync .env to coolify",
+        "coolify status"
+      ]
+    },
+    {
+      "name": "hermes-remote",
+      "version": "0.3.0",
+      "path": "hermes-remote/",
+      "obviates": [
+        "list the hermes crons",
+        "pause the hermes cron",
+        "trigger the gbrain sync cron",
+        "swap the hermes model",
+        "show hermes env",
+        "chat with hermes",
+        "what's on the remote hermes"
+      ]
+    },
+    {
+      "name": "langfuse-remote",
+      "version": "0.4.0",
+      "path": "langfuse-remote/",
+      "obviates": [
+        "list langfuse instances",
+        "send a trace to langfuse",
+        "export the langfuse prompts",
+        "migrate prompts to the new langfuse",
+        "check langfuse health",
+        "monitor langfuse user",
+        "fetch langfuse trace"
+      ]
+    }
+  ],
   "homepage": "https://github.com/osouthgate/agent-plus-skills",
   "license": "MIT"
 }
