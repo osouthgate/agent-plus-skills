@@ -31,8 +31,7 @@
         "tail the failing job logs",
         "wait for the run on <branch>",
         "post a comment on PR <N>"
-      ],
-      "agent_plus_refresh_handler": true
+      ]
     },
     {
       "name": "hcloud-remote",
@@ -87,8 +86,7 @@
         "linear project status",
         "turn this doc into a linear issue",
         "what's on <issue-id>"
-      ],
-      "agent_plus_refresh_handler": true
+      ]
     },
     {
       "name": "openrouter-remote",
@@ -116,8 +114,7 @@
         "env vars on <service>",
         "show me recent errors on <service>",
         "railway overview"
-      ],
-      "agent_plus_refresh_handler": true
+      ]
     },
     {
       "name": "supabase-remote",
@@ -131,8 +128,7 @@
         "regenerate types",
         "list Supabase projects",
         "resolve project ref"
-      ],
-      "agent_plus_refresh_handler": true
+      ]
     },
     {
       "name": "vercel-remote",
