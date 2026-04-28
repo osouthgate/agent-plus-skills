@@ -20,6 +20,19 @@
       ]
     },
     {
+      "name": "hcloud-remote",
+      "version": "0.3.0",
+      "path": "hcloud-remote/",
+      "obviates": [
+        "what's the IP of the hetzner box",
+        "ssh into the vps",
+        "reboot the vps",
+        "take a snapshot before risky work",
+        "list hetzner snapshots",
+        "hetzner server status"
+      ]
+    },
+    {
       "name": "hermes-remote",
       "version": "0.3.0",
       "path": "hermes-remote/",
