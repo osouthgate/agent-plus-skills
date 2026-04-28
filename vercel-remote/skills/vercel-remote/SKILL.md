@@ -47,6 +47,8 @@ vercel-remote domains verify <domain> --project <name> [--wait] [--timeout 300]
 vercel-remote env list --project <name> [--env production|preview|development]
 vercel-remote env set <KEY> <VALUE> --project <name> [--env ...] [--wait]
 vercel-remote env remove <KEY> --project <name> [--env ...] [--wait]
+
+vercel-remote whoami [--json]   # identity for `agent-plus refresh` ("what's my vercel identity")
 ```
 
 All list/show commands emit JSON to stdout. Use `--pretty` for indentation.

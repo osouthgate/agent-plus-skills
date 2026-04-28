@@ -21,7 +21,7 @@
     },
     {
       "name": "github-remote",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "path": "github-remote/",
       "obviates": [
         "is this PR green",
@@ -62,7 +62,7 @@
     },
     {
       "name": "langfuse-remote",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "path": "langfuse-remote/",
       "obviates": [
         "list langfuse instances",
@@ -76,7 +76,7 @@
     },
     {
       "name": "linear-remote",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "path": "linear-remote/",
       "obviates": [
         "add this to linear",
@@ -104,7 +104,7 @@
     },
     {
       "name": "railway-ops",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "path": "railway-ops/",
       "obviates": [
         "what's happening on railway",
@@ -118,7 +118,7 @@
     },
     {
       "name": "supabase-remote",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "path": "supabase-remote/",
       "obviates": [
         "run this SQL on Supabase",
@@ -132,7 +132,7 @@
     },
     {
       "name": "vercel-remote",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "path": "vercel-remote/",
       "obviates": [
         "what's happening on vercel",
@@ -143,8 +143,7 @@
         "check domains on <project>",
         "tail the logs on <deployment>",
         "trigger a vercel deploy"
-      ],
-      "agent_plus_refresh_handler": true
+      ]
     }
   ],
   "homepage": "https://github.com/osouthgate/agent-plus-skills",

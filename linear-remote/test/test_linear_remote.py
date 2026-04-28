@@ -411,5 +411,52 @@ class TestToolMeta(unittest.TestCase):
         self.assertEqual(parsed["id"], "LOA-1")
 
 
+class TestWhoami(unittest.TestCase):
+    """whoami is the agent-plus refresh handler. Soft-fails on missing
+    LINEAR_API_KEY, soft-fails on GraphQL errors, no key leakage."""
+
+    def test_no_api_key_soft_fail(self) -> None:
+        result = lr.whoami({})
+        self.assertIsNone(result["name"])
+        self.assertIsNone(result["email"])
+        self.assertEqual(result["teams"], [])
+        self.assertIn("error", result)
+        self.assertIn("LINEAR_API_KEY", result["error"])
+
+    def test_authed_path(self) -> None:
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self):
+                return json.dumps({
+                    "data": {
+                        "viewer": {"id": "u1", "name": "Alice", "email": "alice@example.com"},
+                        "teams": {"nodes": [
+                            {"id": "t1", "key": "ENG", "name": "Engineering"},
+                        ]},
+                    }
+                }).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=FakeResp()):
+            result = lr.whoami({"LINEAR_API_KEY": "lin_api_supersecret"})
+
+        self.assertEqual(result["name"], "Alice")
+        self.assertEqual(result["email"], "alice@example.com")
+        self.assertEqual(len(result["teams"]), 1)
+        self.assertEqual(result["teams"][0]["key"], "ENG")
+        blob = json.dumps(result)
+        self.assertNotIn("lin_api_supersecret", blob)
+
+    def test_envelope_via_main(self) -> None:
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = lr.main(["whoami"])
+        self.assertEqual(rc, 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["tool"]["name"], "linear-remote")
+        self.assertIn("name", out)
+        self.assertIn("email", out)
+
+
 if __name__ == "__main__":
     unittest.main()

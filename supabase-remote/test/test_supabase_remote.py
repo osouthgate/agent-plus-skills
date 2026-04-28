@@ -802,5 +802,66 @@ class TestArgparseWiring(unittest.TestCase):
         self.assertEqual(args.schema, ["public", "auth"])
 
 
+class TestWhoami(unittest.TestCase):
+    """whoami is the agent-plus refresh handler. Soft-fails on missing
+    SUPABASE_ACCESS_TOKEN, soft-fails on API error, never leaks the token."""
+
+    def setUp(self) -> None:
+        self._saved = os.environ.pop("SUPABASE_ACCESS_TOKEN", None)
+
+    def tearDown(self) -> None:
+        if self._saved is not None:
+            os.environ["SUPABASE_ACCESS_TOKEN"] = self._saved
+        else:
+            os.environ.pop("SUPABASE_ACCESS_TOKEN", None)
+
+    def _run_whoami(self) -> dict:
+        buf = io.StringIO()
+        parser = sr.build_parser()
+        args = parser.parse_args(["whoami"])
+        with redirect_stdout(buf):
+            args.func(args)
+        return json.loads(buf.getvalue())
+
+    def test_no_token_soft_fail(self) -> None:
+        out = self._run_whoami()
+        self.assertEqual(out["tool"]["name"], "supabase-remote")
+        self.assertIn("version", out["tool"])
+        self.assertEqual(out["projects"], [])
+        self.assertIsNone(out["linked_project_ref"])
+        self.assertIn("error", out)
+
+    def test_authed_path(self) -> None:
+        from unittest.mock import patch
+
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self):
+                return json.dumps([
+                    {"name": "p1", "id": "abc", "region": "us-east-1", "organization_id": "org_1"},
+                    {"name": "p2", "ref": "def", "region": "eu-west-1", "organization_id": "org_2"},
+                ]).encode("utf-8")
+
+        os.environ["SUPABASE_ACCESS_TOKEN"] = "sbp_supersecret_token"
+        try:
+            with patch("urllib.request.urlopen", return_value=FakeResp()):
+                out = self._run_whoami()
+        finally:
+            os.environ.pop("SUPABASE_ACCESS_TOKEN", None)
+
+        self.assertEqual(len(out["projects"]), 2)
+        self.assertEqual(out["projects"][0]["id"], "abc")
+        self.assertEqual(out["projects"][1]["id"], "def")
+        blob = json.dumps(out)
+        self.assertNotIn("sbp_supersecret_token", blob)
+        self.assertNotIn("Bearer", blob)
+
+    def test_envelope_has_tool_meta(self) -> None:
+        out = self._run_whoami()
+        self.assertIn("tool", out)
+        self.assertEqual(out["tool"]["name"], "supabase-remote")
+
+
 if __name__ == "__main__":
     unittest.main()

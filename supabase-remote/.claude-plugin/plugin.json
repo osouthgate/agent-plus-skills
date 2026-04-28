@@ -1,7 +1,7 @@
 {
   "name": "supabase-remote",
-  "description": "Remote CLI for day-to-day Supabase project ops \u2014 project list/resolve, SQL exec with JSON-envelope stripping and post-run row verification, RLS audit, TypeScript gen-types. Wraps the Management API + `supabase` CLI.",
-  "version": "0.3.0",
+  "description": "Remote CLI for day-to-day Supabase project ops — project list/resolve, SQL exec with JSON-envelope stripping and post-run row verification, RLS audit, TypeScript gen-types. Wraps the Management API + `supabase` CLI.",
+  "version": "0.4.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"
@@ -18,5 +18,11 @@
     "sql",
     "management-api"
   ],
-  "agent_plus_version": ">=0.5"
+  "agent_plus_version": ">=0.7",
+  "refresh_handler": {
+    "command": "supabase-remote whoami --json",
+    "timeout_seconds": 10,
+    "identity_keys": ["linked_project_ref", "projects"],
+    "failure_mode": "soft"
+  }
 }

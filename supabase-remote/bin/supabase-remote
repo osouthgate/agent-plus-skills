@@ -731,6 +731,56 @@ def cmd_rls_audit(args: argparse.Namespace) -> None:
 # ─── subcommands: gen-types ───────────────────────────────────────────────────
 
 
+def cmd_whoami(args: argparse.Namespace) -> None:
+    """Identity for `agent-plus refresh`. Returns linked_project_ref + a
+    capped list of projects accessible with the configured token. Soft-
+    fails (exit 0) on missing token or API error so the framework can
+    treat the plugin as unconfigured rather than abort the refresh."""
+    out: dict[str, Any] = {
+        "linked_project_ref": _read_linked_ref(),
+        "projects": [],
+    }
+
+    tok = (os.environ.get("SUPABASE_ACCESS_TOKEN") or "").strip()
+    if not tok:
+        out["error"] = "SUPABASE_ACCESS_TOKEN not set"
+        _dump_json(out)
+        return
+
+    # Inline a soft-fail variant of _fetch_projects (which die's on HTTP error).
+    try:
+        url = f"{API_BASE}/projects"
+        headers = {
+            "Authorization": f"Bearer {tok}",
+            "Accept": "application/json",
+            "User-Agent": "supabase-remote/whoami",
+        }
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read()
+            data = json.loads(raw) if raw else []
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        out["error"] = f"failed to call /v1/projects: {type(e).__name__}"
+        _dump_json(out)
+        return
+
+    if isinstance(data, list):
+        cleaned = []
+        for p in data[:20]:
+            if not isinstance(p, dict):
+                continue
+            cleaned.append({
+                "name": p.get("name"),
+                "id": p.get("id") or p.get("ref"),
+                "region": p.get("region"),
+                "organization_id": p.get("organization_id"),
+            })
+        out["projects"] = cleaned
+        out["count"] = len(cleaned)
+
+    _dump_json(out)
+
+
 def cmd_gen_types(args: argparse.Namespace) -> None:
     ref = _resolve_project_ref(args.project, debug=args.debug)
     target = Path(args.target).expanduser().resolve()
@@ -910,6 +960,15 @@ def build_parser() -> argparse.ArgumentParser:
              "multiple schemas. Defaults to the Supabase CLI default (public).",
     )
     gt.set_defaults(func=cmd_gen_types)
+
+    # whoami (refresh_handler target)
+    wh = sub.add_parser(
+        "whoami",
+        help="emit identity (linked_project_ref, projects) for `agent-plus refresh`",
+    )
+    wh.add_argument("--json", action="store_true",
+                    help="emit JSON (default; flag accepted for explicitness)")
+    wh.set_defaults(func=cmd_whoami)
 
     return p
 

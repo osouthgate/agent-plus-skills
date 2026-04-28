@@ -1,7 +1,7 @@
 {
   "name": "github-remote",
   "description": "Read-first wrapper around the GitHub REST API \u2014 one-call PR/branch overviews (state + checks + reviews + runs), name-resolved PRs and issues, --wait on async flows, --json on lists. Zero token leakage. One write: pr comment.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"
@@ -18,5 +18,11 @@
     "incident-triage",
     "code-review"
   ],
-  "agent_plus_version": ">=0.5"
+  "agent_plus_version": ">=0.7",
+  "refresh_handler": {
+    "command": "github-remote whoami --json",
+    "timeout_seconds": 10,
+    "identity_keys": ["login", "default_org"],
+    "failure_mode": "soft"
+  }
 }

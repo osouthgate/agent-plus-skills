@@ -1092,6 +1092,81 @@ def _shape_value(v: Any, depth: int) -> dict[str, Any]:
 # ──────────────────────────── CLI ────────────────────────────
 
 
+# ──────────────────────────── whoami ────────────────────────────
+
+
+def whoami(cfg: dict[str, str]) -> dict[str, Any]:
+    """Resolve identity for this GitHub credential. Returns a flat dict with
+    `login`, `default_org` (or null), and `scopes` at the top level (matching
+    the `identity_keys` declared in plugin.json's refresh_handler block).
+
+    Soft failure: if no token is available or the API call fails, returns
+    `{login: null, default_org: null, scopes: [], error: "..."}` with no
+    raise — agent-plus refresh treats exit 0 + status absence as fine and
+    extracts identity_keys regardless of whether they are populated.
+    """
+    out: dict[str, Any] = {
+        "login": None,
+        "default_org": None,
+        "scopes": [],
+    }
+
+    # Token discovery: env first, then `gh auth token` fallback. Mirrors
+    # require_token() but never calls die().
+    token = (cfg.get("GITHUB_TOKEN") or "").strip()
+    if not token:
+        token = _gh_auth_token() or ""
+
+    if not token:
+        out["error"] = "not authenticated (no GITHUB_TOKEN and `gh auth token` returned nothing)"
+        return out
+
+    base = _api_base(cfg)
+    url = base + "/user"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    req = urllib.request.Request(url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            scopes_hdr = resp.headers.get("X-OAuth-Scopes") or "" if resp.headers else ""
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        out["error"] = f"HTTP {e.code} on /user"
+        return out
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        out["error"] = f"network/parse error on /user: {e}"
+        return out
+
+    if isinstance(body, dict):
+        login = body.get("login")
+        if isinstance(login, str):
+            out["login"] = login
+        company = body.get("company")
+        if isinstance(company, str) and company.strip():
+            # GitHub's "company" field is the closest free-text approximation
+            # of "default org". The original _refresh_github used the cwd's
+            # `git remote origin` owner — preserved here as a fallback.
+            out["default_org"] = company.strip().lstrip("@") or None
+
+    if out["default_org"] is None:
+        # Fallback: cwd git remote origin owner.
+        try:
+            slug = _git_remote_repo()
+            if slug and "/" in slug:
+                out["default_org"] = slug.split("/", 1)[0]
+        except Exception:  # noqa: BLE001 — never crash whoami
+            pass
+
+    if scopes_hdr:
+        out["scopes"] = [s.strip() for s in scopes_hdr.split(",") if s.strip()]
+
+    return out
+
+
 def _add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--token", help="GITHUB_TOKEN (override env)")
     p.add_argument("--repo", help="owner/name (override GITHUB_REPO / git remote)")
@@ -1286,6 +1361,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sov.add_argument("ref", help="branch name or PR number")
 
+    # whoami (refresh_handler target)
+    swh = sub.add_parser(
+        "whoami",
+        help="emit identity (login, default_org, scopes) for `agent-plus refresh`",
+        description=(
+            "Emit identity for the configured GitHub credential. Used by\n"
+            "`agent-plus refresh` to populate services.github-remote.identity.\n"
+            "Always exits 0 on auth failure (soft) — the framework treats\n"
+            "missing identity_keys as 'unconfigured', not an error.\n\n"
+            "Example:\n  github-remote whoami --json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    swh.add_argument("--json", action="store_true",
+                     help="emit JSON (default; flag accepted for explicitness)")
+
     return p
 
 
@@ -1293,6 +1384,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     cfg = _cfg_from_args(args)
+
+    # whoami runs before resolve_repo because it must work outside a git repo.
+    if args.cmd == "whoami":
+        emit_json(whoami(cfg), pretty=getattr(args, "pretty", False))
+        return 0
 
     try:
         owner, repo = resolve_repo(getattr(args, "repo", None), cfg)

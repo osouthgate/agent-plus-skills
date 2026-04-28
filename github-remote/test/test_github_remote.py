@@ -491,5 +491,70 @@ class TestWriteOutputFile(unittest.TestCase):
         self.assertEqual(args.shape_depth, 3)
 
 
+# ──────────────────────────── whoami ────────────────────────────
+
+
+class TestWhoami(unittest.TestCase):
+    """The whoami subcommand is the agent-plus refresh handler. Contract:
+    exit 0 in both authed and unauthed cases (soft failure), JSON envelope
+    with tool.name + tool.version, identity_keys at top level, no secrets."""
+
+    def test_no_token_returns_null_login_no_raise(self) -> None:
+        # Both env and `gh auth token` empty — soft failure path.
+        with patch.object(gr, "_gh_auth_token", return_value=None):
+            result = gr.whoami({})
+        self.assertIsNone(result["login"])
+        self.assertIsNone(result["default_org"])
+        self.assertEqual(result["scopes"], [])
+        self.assertIn("error", result)
+        self.assertIn("not authenticated", result["error"])
+
+    def test_authed_path_emits_login_and_scopes(self) -> None:
+        # Mock urlopen to return a fake /user payload + scope header.
+        class FakeResp:
+            headers = {"X-OAuth-Scopes": "repo, workflow, read:org"}
+
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return json.dumps({"login": "alice", "company": "@acme"}).encode("utf-8")
+
+        with patch.object(gr, "_gh_auth_token", return_value="ghp_fake"), \
+             patch("urllib.request.urlopen", return_value=FakeResp()):
+            result = gr.whoami({})
+
+        self.assertEqual(result["login"], "alice")
+        self.assertEqual(result["default_org"], "acme")
+        self.assertEqual(set(result["scopes"]), {"repo", "workflow", "read:org"})
+
+    def test_envelope_shape_via_main(self) -> None:
+        # End-to-end: invoke main(['whoami']) and capture stdout.
+        with patch.object(gr, "_gh_auth_token", return_value=None):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = gr.main(["whoami"])
+        self.assertEqual(rc, 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["tool"]["name"], "github-remote")
+        self.assertIn("version", out["tool"])
+        self.assertIn("login", out)
+        self.assertIn("default_org", out)
+        self.assertIn("scopes", out)
+
+    def test_no_secret_leakage(self) -> None:
+        # Token reaches the API call but never appears in the output.
+        class FakeResp:
+            headers = {"X-OAuth-Scopes": "repo"}
+
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return json.dumps({"login": "bob"}).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=FakeResp()):
+            result = gr.whoami({"GITHUB_TOKEN": "ghp_supersecret_value"})
+        blob = json.dumps(result)
+        self.assertNotIn("ghp_supersecret_value", blob)
+        self.assertNotIn("Bearer", blob)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,8 @@ supabase-remote sql-inline "<query>" [--project NAME] [--write] [--json]
 supabase-remote rls-audit [--project NAME] [--format table|json]
 
 supabase-remote gen-types <target.ts> [--project NAME] [--schema NAME]...
+
+supabase-remote whoami [--json]   # identity for `agent-plus refresh` ("what's my supabase identity")
 ```
 
 Add `--debug` at the top level to print the underlying HTTP and shell calls (access token is scrubbed). Run `supabase-remote --version` to print the plugin version and exit — handy for self-diagnosis without needing auth.

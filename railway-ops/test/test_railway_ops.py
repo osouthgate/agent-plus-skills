@@ -1083,5 +1083,64 @@ class TestWriteOutputFile(unittest.TestCase):
             parser.parse_args(["--shape-depth", "5", "status"])
 
 
+class TestWhoami(unittest.TestCase):
+    """whoami is the agent-plus refresh handler. Soft-fails on every error
+    path. Never raises, never calls die(), always emits a JSON envelope."""
+
+    def _run(self) -> dict:
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        parser = ro.build_parser()
+        args = parser.parse_args(["whoami"])
+        with redirect_stdout(buf):
+            ro.cmd_whoami(args)
+        return json.loads(buf.getvalue())
+
+    def test_no_railway_cli_soft_fail(self) -> None:
+        with patch.object(ro, "railway", return_value=(1, "", "command not found")):
+            out = self._run()
+        self.assertIsNone(out["project"])
+        self.assertIsNone(out["environment"])
+        self.assertIsNone(out["service"])
+        self.assertIn("error", out)
+        self.assertIn("railway CLI", out["error"])
+        self.assertEqual(out["tool"]["name"], "railway-ops")
+
+    def test_not_logged_in_soft_fail(self) -> None:
+        responses = iter([
+            (0, "railway 3.0.0", ""),
+            (1, "", "Unauthorized"),
+        ])
+        with patch.object(ro, "railway", lambda *a, **kw: next(responses)):
+            out = self._run()
+        self.assertIn("error", out)
+        self.assertIn("not authenticated", out["error"])
+
+    def test_authed_with_linked_project(self) -> None:
+        responses = iter([
+            (0, "railway 3.0.0", ""),
+            (0, "Logged in as alice", ""),
+            (0, json.dumps({
+                "name": "my-app",
+                "environments": {"edges": [{"node": {"name": "production"}}]},
+            }), ""),
+            (0, json.dumps([{"name": "my-app", "id": "p_123"}]), ""),
+        ])
+        with patch.object(ro, "railway", lambda *a, **kw: next(responses)):
+            out = self._run()
+        self.assertEqual(out["project"], "my-app")
+        self.assertEqual(out["environment"], "production")
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["projects"][0]["id"], "p_123")
+
+    def test_no_secret_leakage(self) -> None:
+        with patch.object(ro, "railway", return_value=(1, "", "")):
+            out = self._run()
+        blob = json.dumps(out)
+        self.assertNotIn("Bearer", blob)
+        self.assertNotIn("RAILWAY_API_TOKEN", blob)
+
+
 if __name__ == "__main__":
     unittest.main()

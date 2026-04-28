@@ -316,5 +316,57 @@ class TestWriteOutputFile(unittest.TestCase):
         self.assertEqual(args.shape_depth, 3)
 
 
+class TestWhoami(unittest.TestCase):
+    """whoami is the agent-plus refresh handler. Soft-fails on missing
+    creds (exit 0, null identity), emits envelope shape, no token leakage."""
+
+    def test_no_token_returns_null_no_raise(self) -> None:
+        result = vr.whoami({})
+        self.assertIsNone(result["username"])
+        self.assertIsNone(result["team"])
+        self.assertIn("error", result)
+        self.assertIn("VERCEL_TOKEN", result["error"])
+
+    def test_authed_path_emits_username(self) -> None:
+        class FakeResp:
+            def __init__(self, payload): self._p = payload
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return json.dumps(self._p).encode("utf-8")
+
+        responses = iter([
+            FakeResp({"user": {"username": "alice", "name": "Alice"}}),
+            FakeResp({"teams": [{"slug": "acme-co", "name": "ACME"}]}),
+        ])
+        with patch("urllib.request.urlopen", lambda *a, **kw: next(responses)):
+            result = vr.whoami({"VERCEL_TOKEN": "v_fake"})
+
+        self.assertEqual(result["username"], "alice")
+        self.assertEqual(result["team"], "acme-co")
+
+    def test_envelope_shape_via_main(self) -> None:
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = vr.main(["whoami"])
+        self.assertEqual(rc, 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["tool"]["name"], "vercel-remote")
+        self.assertIn("version", out["tool"])
+        self.assertIn("username", out)
+        self.assertIn("team", out)
+
+    def test_no_secret_leakage(self) -> None:
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return json.dumps({"user": {"username": "bob"}}).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=FakeResp()):
+            result = vr.whoami({"VERCEL_TOKEN": "v_supersecret_token"})
+        blob = json.dumps(result)
+        self.assertNotIn("v_supersecret_token", blob)
+        self.assertNotIn("Bearer", blob)
+
+
 if __name__ == "__main__":
     unittest.main()

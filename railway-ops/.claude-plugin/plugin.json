@@ -1,7 +1,7 @@
 {
   "name": "railway-ops",
-  "description": "Read-first wrapper around the Railway CLI \u2014 single-call env overviews (services, deploy status, recent errors/warnings, env var NAMES-only) for fast incident triage. Zero env-var-value leakage.",
-  "version": "0.5.0",
+  "description": "Read-first wrapper around the Railway CLI — single-call env overviews (services, deploy status, recent errors/warnings, env var NAMES-only) for fast incident triage. Zero env-var-value leakage.",
+  "version": "0.6.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"
@@ -17,5 +17,11 @@
     "logs",
     "incident-triage"
   ],
-  "agent_plus_version": ">=0.5"
+  "agent_plus_version": ">=0.7",
+  "refresh_handler": {
+    "command": "railway-ops whoami --json",
+    "timeout_seconds": 15,
+    "identity_keys": ["project", "environment", "service"],
+    "failure_mode": "soft"
+  }
 }

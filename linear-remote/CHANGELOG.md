@@ -4,6 +4,15 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.4.0 - 2026-04-28
+
+### Added
+- `whoami` subcommand: emits `{name, email, teams[]}` for the configured Linear credential by querying the GraphQL `viewer` field. Used by `agent-plus refresh` (framework 0.7+) to populate `services.linear-remote.identity`. Soft failure: returns `{name: null, email: null, teams: [], error: ...}` and exit 0 when `LINEAR_API_KEY` is missing or rejected. Never calls `require_api_key` (which `die`s).
+- `refresh_handler` block in `plugin.json` declaring `whoami --json` as the framework's identity-emitting command, with `identity_keys: ["name", "email"]` and `failure_mode: "soft"`.
+
+### Changed
+- Bumped `agent_plus_version` floor to `>=0.7`.
+
 ## 0.3.0 - 2026-04-28
 
 ### Changed

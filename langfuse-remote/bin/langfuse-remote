@@ -529,6 +529,36 @@ def cmd_list_instances(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_whoami(args: argparse.Namespace) -> int:
+    """Identity for `agent-plus refresh`. Returns a list of configured
+    Langfuse instances with name + host (base_url). NEVER emits keys/secrets.
+    Soft-fails (exit 0 + empty list + error) on no instances. Compatible
+    with the prior _refresh_langfuse contract from framework <0.7."""
+    instances = list_instances()
+    out: dict[str, Any] = {"instances": []}
+    if not instances:
+        out["error"] = "no Langfuse instances configured"
+        print(json.dumps(_with_tool_meta(out)))
+        return 0
+
+    default = default_instance_name(instances)
+    cleaned: list[dict[str, Any]] = []
+    for name in sorted(instances):
+        inst = instances[name]
+        cleaned.append({
+            "name": name,
+            "host": inst.get("base_url"),
+            "default": (name == default),
+            "source": inst.get("_source", "unknown"),
+        })
+    out["instances"] = cleaned
+    out["count"] = len(cleaned)
+    if default:
+        out["default"] = default
+    print(json.dumps(_with_tool_meta(out)))
+    return 0
+
+
 def cmd_show_instance(args: argparse.Namespace) -> int:
     inst = resolve(args.instance)
     print(json.dumps(_with_tool_meta({
@@ -952,6 +982,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=5, help="Sessions to include (default 5)")
     sp.add_argument("--pretty", action="store_true")
     sp.set_defaults(func=cmd_monitor_user)
+
+    # whoami (refresh_handler target)
+    sp = sub.add_parser(
+        "whoami",
+        help="emit identity (configured instances, names + hosts only) for `agent-plus refresh`",
+    )
+    sp.add_argument("--json", action="store_true",
+                    help="emit JSON (default; flag accepted for explicitness)")
+    sp.set_defaults(func=cmd_whoami)
 
     return p
 

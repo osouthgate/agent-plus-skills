@@ -44,6 +44,8 @@ github-remote run logs <RUN_ID> [--job <name>] [--errors-only] [--tail 50]
 github-remote run wait <RUN_ID-or-branch> [--timeout 1800] [--poll-interval 10]
 
 github-remote overview <branch-or-pr-number>
+
+github-remote whoami [--json]   # identity for `agent-plus refresh` ("what's my github identity")
 ```
 
 All list/show commands emit JSON to stdout. Use `--pretty` for indentation.

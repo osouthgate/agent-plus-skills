@@ -85,6 +85,11 @@ langfuse-remote list-instances
 langfuse-remote show-instance                      # default instance
 langfuse-remote --instance cloud show-instance
 
+# Identity for `agent-plus refresh` ("what's my langfuse identity") —
+# JSON envelope, instance names + hosts only (no keys), soft-fails on
+# empty config.
+langfuse-remote whoami --json
+
 # Health
 langfuse-remote health                             # active/default instance
 langfuse-remote health --all                       # every configured instance, one per line

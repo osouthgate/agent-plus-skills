@@ -51,6 +51,8 @@ linear-remote teams list
 linear-remote states <team-name>
 linear-remote labels [--team-filter <name>]
 linear-remote cycles <team-name>
+
+linear-remote whoami [--json]   # identity for `agent-plus refresh` ("what's my linear identity")
 ```
 
 All list/show commands emit JSON to stdout. Use `--pretty` for indentation.

@@ -1535,7 +1535,79 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scy.add_argument("team_name")
 
+    # whoami (refresh_handler target)
+    swh = sub.add_parser(
+        "whoami",
+        help="emit identity (name, email) for `agent-plus refresh`",
+        description=(
+            "Emit identity for the configured Linear credential by querying\n"
+            "the GraphQL `viewer` field. Used by `agent-plus refresh` to populate\n"
+            "services.linear-remote.identity. Soft failure: returns nulls + error\n"
+            "with exit 0 when LINEAR_API_KEY is missing or rejected.\n\n"
+            "Example:\n  linear-remote whoami --json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    swh.add_argument("--json", action="store_true",
+                     help="emit JSON (default; flag accepted for explicitness)")
+
     return p
+
+
+def whoami(cfg: dict[str, str]) -> dict[str, Any]:
+    """Soft-fail viewer query. Never calls require_api_key (which die's).
+    Returns `{name, email, teams[]}` at the top level — `name` and `email`
+    match the identity_keys declared in plugin.json."""
+    out: dict[str, Any] = {"name": None, "email": None, "teams": []}
+    api_key = (cfg.get("LINEAR_API_KEY") or "").strip()
+    if not api_key:
+        out["error"] = "LINEAR_API_KEY not set"
+        return out
+
+    query = ("{ viewer { id name email } "
+             "teams(first: 20) { nodes { id key name } } }")
+    body_bytes = json.dumps({"query": query, "variables": {}}).encode("utf-8")
+    headers = {
+        "Authorization": api_key,  # NO Bearer prefix — Linear convention.
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+    }
+    req = urllib.request.Request(API_URL, data=body_bytes, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read().decode("utf-8")
+            parsed = json.loads(raw) if raw else {}
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        out["error"] = f"viewer query failed: {type(e).__name__}"
+        return out
+
+    if not isinstance(parsed, dict):
+        out["error"] = "unexpected response shape"
+        return out
+    if parsed.get("errors"):
+        out["error"] = "GraphQL error (likely auth)"
+        return out
+
+    data = parsed.get("data") or {}
+    viewer = data.get("viewer") or {}
+    if isinstance(viewer, dict):
+        if isinstance(viewer.get("name"), str):
+            out["name"] = viewer["name"]
+        if isinstance(viewer.get("email"), str):
+            out["email"] = viewer["email"]
+
+    teams_root = data.get("teams") or {}
+    nodes = teams_root.get("nodes") if isinstance(teams_root, dict) else []
+    teams_clean: list[dict[str, Any]] = []
+    if isinstance(nodes, list):
+        for t in nodes[:20]:
+            if isinstance(t, dict):
+                teams_clean.append({
+                    "id": t.get("id"), "key": t.get("key"), "name": t.get("name"),
+                })
+    out["teams"] = teams_clean
+    return out
 
 
 def _split_csv(s: Optional[str]) -> Optional[list[str]]:
@@ -1549,6 +1621,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     cfg = _cfg_from_args(args)
+
+    if args.cmd == "whoami":
+        emit_json(whoami(cfg), pretty=getattr(args, "pretty", False))
+        return 0
 
     try:
         if args.cmd == "issues":

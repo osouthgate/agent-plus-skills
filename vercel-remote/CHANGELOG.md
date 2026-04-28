@@ -4,6 +4,15 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.4.0 - 2026-04-28
+
+### Added
+- `whoami` subcommand: emits `{username, team}` for the configured Vercel credential (sources `VERCEL_TOKEN` + optional `VERCEL_TEAM_ID`). Used by `agent-plus refresh` (framework 0.7+) to populate `services.vercel-remote.identity`. Soft failure: returns `{username: null, team: null, error: ...}` with exit 0 when no token is reachable.
+- `refresh_handler` block in `plugin.json` declaring `whoami --json` as the framework's identity-emitting command, with `identity_keys: ["username", "team"]` and `failure_mode: "soft"`.
+
+### Changed
+- Bumped `agent_plus_version` floor to `>=0.7` (the version of the framework that discovers `refresh_handler` from `plugin.json`).
+
 ## 0.3.0 - 2026-04-28
 
 ### Changed

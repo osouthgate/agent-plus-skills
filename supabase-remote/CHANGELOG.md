@@ -4,6 +4,15 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.4.0 - 2026-04-28
+
+### Added
+- `whoami` subcommand: emits `{linked_project_ref, projects, count}` for the configured Supabase credential. Used by `agent-plus refresh` (framework 0.7+) to populate `services.supabase-remote.identity`. Soft failure: returns the same shape with `linked_project_ref: null` + `projects: []` + `error: ...` and exit 0 when `SUPABASE_ACCESS_TOKEN` is missing or the Management API call errors. `linked_project_ref` reads `./supabase/.temp/project-ref` (the supabase-link convention) walking up from cwd.
+- `refresh_handler` block in `plugin.json` declaring `whoami --json` as the framework's identity-emitting command, with `identity_keys: ["linked_project_ref", "projects"]` and `failure_mode: "soft"`.
+
+### Changed
+- Bumped `agent_plus_version` floor to `>=0.7`.
+
 ## 0.3.0 - 2026-04-28
 
 ### Changed

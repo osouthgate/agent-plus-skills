@@ -1149,6 +1149,74 @@ def cmd_overview(args: argparse.Namespace) -> None:
     emit(data, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
+def cmd_whoami(args: argparse.Namespace) -> None:
+    """Identity for `agent-plus refresh`. Returns the linked project,
+    environment, and a service hint by shelling out to `railway list --json`
+    and `railway status --json`. Soft-fails on every error — exits 0 with
+    `{project: null, environment: null, service: null, error: "..."}` so
+    the framework can flag the plugin as unconfigured rather than abort
+    the refresh. Never raises, never calls die()."""
+    out: dict[str, Any] = {
+        "project": None,
+        "environment": None,
+        "service": None,
+    }
+
+    rc, who_out, _ = railway(["--version"], timeout=5)
+    if rc != 0:
+        out["error"] = "railway CLI not on PATH"
+        emit(out, getattr(args, "pretty", False))
+        return
+
+    rc, who_out, _ = railway(["whoami"], timeout=5)
+    if rc != 0 or "Logged in" not in who_out:
+        out["error"] = "not authenticated (`railway login` required)"
+        emit(out, getattr(args, "pretty", False))
+        return
+
+    # railway status --json: gives the linked project + environment.
+    rc, st_out, st_err = railway(["status", "--json"], timeout=10)
+    if rc == 0:
+        try:
+            data = json.loads(st_out or "{}")
+            if isinstance(data, dict):
+                out["project"] = data.get("name")
+                env_name = None
+                envs_root = data.get("environments")
+                if isinstance(envs_root, dict):
+                    edges = envs_root.get("edges") or []
+                    if isinstance(edges, list) and edges and isinstance(edges[0], dict):
+                        node = edges[0].get("node")
+                        if isinstance(node, dict):
+                            env_name = node.get("name")
+                if not env_name and isinstance(data.get("environment"), dict):
+                    env_name = data["environment"].get("name")
+                out["environment"] = env_name
+        except json.JSONDecodeError:
+            pass
+    elif "No linked project" in st_err or "not linked" in st_err.lower():
+        out["error"] = "no linked project (`railway link` required)"
+
+    # Best-effort service hint from `railway list --json` (matches the
+    # original _refresh_railway in the framework). Cap at 20.
+    rc, lst_out, _ = railway(["list", "--json"], timeout=10)
+    projects: list[dict[str, Any]] = []
+    if rc == 0:
+        try:
+            data = json.loads(lst_out or "[]")
+            if isinstance(data, list):
+                for p in data[:20]:
+                    if isinstance(p, dict):
+                        projects.append({"name": p.get("name"), "id": p.get("id")})
+        except json.JSONDecodeError:
+            pass
+    if projects:
+        out["projects"] = projects
+        out["count"] = len(projects)
+
+    emit(out, getattr(args, "pretty", False))
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     check_prereqs()
     rc, out, err = railway(["whoami"], timeout=10)
@@ -1415,6 +1483,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--pretty", action="store_true", help="indent JSON output",
     )
 
+    # whoami (refresh_handler target) — soft-fail variant of `status` for
+    # `agent-plus refresh`. Differs from `status` in that it never die()s.
+    wh = sub.add_parser(
+        "whoami",
+        help="emit identity (project, environment, service) for `agent-plus refresh`",
+    )
+    wh.add_argument("--json", action="store_true",
+                    help="emit JSON (default; flag accepted for explicitness)")
+    wh.add_argument("--pretty", action="store_true", help="indent JSON output")
+
     return p
 
 
@@ -1426,6 +1504,7 @@ DISPATCH = {
     "envs": cmd_envs,
     "services": cmd_services,
     "projects": cmd_projects,
+    "whoami": cmd_whoami,
 }
 
 

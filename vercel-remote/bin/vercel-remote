@@ -763,6 +763,75 @@ def env_remove(
 # ──────────────────────────── emit ────────────────────────────
 
 
+# ──────────────────────────── whoami ────────────────────────────
+
+
+def whoami(cfg: dict[str, str]) -> dict[str, Any]:
+    """Identity for `agent-plus refresh`. Hits /v2/user and (optionally) /v2/teams.
+    Soft-fails when VERCEL_TOKEN is missing or the API call errors — exit 0
+    with `{username: null, team: null, error: ...}` so the framework treats
+    the plugin as unconfigured rather than aborting the whole refresh."""
+    out: dict[str, Any] = {
+        "username": None,
+        "team": None,
+    }
+    token = (cfg.get("VERCEL_TOKEN") or "").strip()
+    if not token:
+        out["error"] = "VERCEL_TOKEN not set"
+        return out
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+    }
+
+    def _call(path: str) -> Optional[dict[str, Any]]:
+        team_id = cfg.get("VERCEL_TEAM_ID", "").strip()
+        url = API_BASE + path
+        if team_id and "teamId=" not in path:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}teamId={urllib.parse.quote(team_id)}"
+        try:
+            req = urllib.request.Request(url, method="GET", headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+        except (urllib.error.URLError, OSError, json.JSONDecodeError):
+            return None
+
+    user_body = _call("/v2/user")
+    if isinstance(user_body, dict):
+        u = user_body.get("user") if isinstance(user_body.get("user"), dict) else user_body
+        if isinstance(u, dict):
+            uname = u.get("username") or u.get("name")
+            if isinstance(uname, str):
+                out["username"] = uname
+    else:
+        out["error"] = "failed to call /v2/user"
+        return out
+
+    # Best-effort team lookup. Vercel users may have no teams (personal acct only).
+    team_id_env = cfg.get("VERCEL_TEAM_ID", "").strip()
+    if team_id_env:
+        team_body = _call(f"/v2/teams/{urllib.parse.quote(team_id_env)}")
+        if isinstance(team_body, dict):
+            tname = team_body.get("slug") or team_body.get("name")
+            if isinstance(tname, str):
+                out["team"] = tname
+    else:
+        teams_body = _call("/v2/teams?limit=1")
+        if isinstance(teams_body, dict):
+            teams = teams_body.get("teams")
+            if isinstance(teams, list) and teams and isinstance(teams[0], dict):
+                first = teams[0]
+                tname = first.get("slug") or first.get("name")
+                if isinstance(tname, str):
+                    out["team"] = tname
+
+    return out
+
+
 def emit_json(obj: Any, *, pretty: bool = False,
               output: Optional[str] = None,
               shape_depth: int = 3) -> None:
@@ -993,6 +1062,21 @@ def build_parser() -> argparse.ArgumentParser:
     ser.add_argument("--env", action="append", choices=["production", "preview", "development"], default=[])
     ser.add_argument("--wait", action="store_true")
 
+    # whoami (refresh_handler target)
+    swh = sub.add_parser(
+        "whoami",
+        help="emit identity (username, team) for `agent-plus refresh`",
+        description=(
+            "Emit identity for the configured Vercel credential. Used by\n"
+            "`agent-plus refresh` to populate services.vercel-remote.identity.\n"
+            "Always exits 0 on auth failure (soft).\n\n"
+            "Example:\n  vercel-remote whoami --json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    swh.add_argument("--json", action="store_true",
+                     help="emit JSON (default; flag accepted for explicitness)")
+
     return p
 
 
@@ -1000,6 +1084,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     cfg = _cfg_from_args(args)
+
+    # whoami runs without project/token resolution — soft-fails on missing creds.
+    if args.cmd == "whoami":
+        emit_json(whoami(cfg), pretty=getattr(args, "pretty", False))
+        return 0
 
     try:
         if args.cmd == "projects":

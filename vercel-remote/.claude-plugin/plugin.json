@@ -1,7 +1,7 @@
 {
   "name": "vercel-remote",
-  "description": "Read-first wrapper around the Vercel REST API \u2014 one-call project overviews (deployments, domains, env NAMES-only), name-resolved projects, --wait on async flows, --json on lists. Zero env-var-value leakage.",
-  "version": "0.3.0",
+  "description": "Read-first wrapper around the Vercel REST API — one-call project overviews (deployments, domains, env NAMES-only), name-resolved projects, --wait on async flows, --json on lists. Zero env-var-value leakage.",
+  "version": "0.4.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"
@@ -17,5 +17,11 @@
     "deployments",
     "incident-triage"
   ],
-  "agent_plus_version": ">=0.5"
+  "agent_plus_version": ">=0.7",
+  "refresh_handler": {
+    "command": "vercel-remote whoami --json",
+    "timeout_seconds": 10,
+    "identity_keys": ["username", "team"],
+    "failure_mode": "soft"
+  }
 }

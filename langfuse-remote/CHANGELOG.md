@@ -4,6 +4,12 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.5.0 — 2026-04-28
+
+- Added `whoami` subcommand: emits `{instances: [{name, host, default, source}], count, default}` for `agent-plus refresh` (framework 0.7+). Lists configured Langfuse instances with their hosts only — public/secret keys are never included. Soft failure: returns `{instances: [], error: ...}` and exit 0 when no instances are configured (env vars unset and config file missing). Sources: `LANGFUSE_BASE_URL/_PUBLIC_KEY/_SECRET_KEY`, prefixed env vars (`LANGFUSE_<NAME>_BASE_URL` etc.), and the JSON config file (default `~/.config/langfuse/instances.json`).
+- Added `refresh_handler` block to `plugin.json` declaring `whoami --json` with `identity_keys: ["instances"]` and `failure_mode: "soft"`.
+- Bumped `agent_plus_version` floor to `>=0.7`.
+
 ## 0.4.0 — 2026-04-28
 
 - Moved to osouthgate/agent-plus-skills marketplace.

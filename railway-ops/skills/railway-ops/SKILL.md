@@ -80,6 +80,10 @@ railway-ops overview --env production --limit 50 --pretty
 # whoami + linked project + available environments
 railway-ops status --pretty
 
+# Identity for `agent-plus refresh` ("what's my railway identity") — soft-fails
+# (exit 0 + nulls) when CLI is missing, not logged in, or no linked project.
+railway-ops whoami --json
+
 # One service's errors + warnings (deeper than overview — bigger --limit)
 railway-ops errors api --env production --since 2h --limit 50 --pretty
 
