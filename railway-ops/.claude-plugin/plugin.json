@@ -1,0 +1,21 @@
+{
+  "name": "railway-ops",
+  "description": "Read-first wrapper around the Railway CLI \u2014 single-call env overviews (services, deploy status, recent errors/warnings, env var NAMES-only) for fast incident triage. Zero env-var-value leakage.",
+  "version": "0.5.0",
+  "author": {
+    "name": "Oliver Southgate",
+    "url": "https://github.com/osouthgate"
+  },
+  "homepage": "https://github.com/osouthgate/agent-plus-skills",
+  "repository": "https://github.com/osouthgate/agent-plus-skills",
+  "license": "MIT",
+  "keywords": [
+    "railway",
+    "devops",
+    "observability",
+    "deploy",
+    "logs",
+    "incident-triage"
+  ],
+  "agent_plus_version": ">=0.5"
+}
