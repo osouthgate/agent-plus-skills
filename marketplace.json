@@ -20,6 +20,21 @@
       ]
     },
     {
+      "name": "github-remote",
+      "version": "0.3.0",
+      "path": "github-remote/",
+      "obviates": [
+        "is this PR green",
+        "what's the state of <branch>",
+        "is this mergeable",
+        "why did CI fail",
+        "tail the failing job logs",
+        "wait for the run on <branch>",
+        "post a comment on PR <N>"
+      ],
+      "agent_plus_refresh_handler": true
+    },
+    {
       "name": "hcloud-remote",
       "version": "0.3.0",
       "path": "hcloud-remote/",
@@ -59,6 +74,81 @@
         "monitor langfuse user",
         "fetch langfuse trace"
       ]
+    },
+    {
+      "name": "linear-remote",
+      "version": "0.3.0",
+      "path": "linear-remote/",
+      "obviates": [
+        "add this to linear",
+        "create a linear issue",
+        "list linear issues",
+        "move this to In Review",
+        "linear project status",
+        "turn this doc into a linear issue",
+        "what's on <issue-id>"
+      ],
+      "agent_plus_refresh_handler": true
+    },
+    {
+      "name": "openrouter-remote",
+      "version": "0.3.0",
+      "path": "openrouter-remote/",
+      "obviates": [
+        "what's my openrouter balance",
+        "show openrouter usage this month",
+        "what's the cheapest model with vision",
+        "find a free model with tools",
+        "list my openrouter keys",
+        "create a new openrouter key",
+        "disable the hermes key"
+      ]
+    },
+    {
+      "name": "railway-ops",
+      "version": "0.5.0",
+      "path": "railway-ops/",
+      "obviates": [
+        "what's happening on railway",
+        "railway status",
+        "is the api up",
+        "why is staging broken",
+        "env vars on <service>",
+        "show me recent errors on <service>",
+        "railway overview"
+      ],
+      "agent_plus_refresh_handler": true
+    },
+    {
+      "name": "supabase-remote",
+      "version": "0.3.0",
+      "path": "supabase-remote/",
+      "obviates": [
+        "run this SQL on Supabase",
+        "apply the seed file",
+        "audit RLS",
+        "which tables don't have RLS",
+        "regenerate types",
+        "list Supabase projects",
+        "resolve project ref"
+      ],
+      "agent_plus_refresh_handler": true
+    },
+    {
+      "name": "vercel-remote",
+      "version": "0.3.0",
+      "path": "vercel-remote/",
+      "obviates": [
+        "what's happening on vercel",
+        "is prod up",
+        "vercel status",
+        "latest deployment on <project>",
+        "env vars on <project>",
+        "check domains on <project>",
+        "tail the logs on <deployment>",
+        "trigger a vercel deploy"
+      ],
+      "agent_plus_refresh_handler": true
     }
   ],
   "homepage": "https://github.com/osouthgate/agent-plus-skills",
