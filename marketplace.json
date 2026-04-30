@@ -7,7 +7,7 @@
   "skills": [
     {
       "name": "coolify-remote",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "path": "coolify-remote/",
       "obviates": [
         "deploy to coolify",
@@ -35,7 +35,7 @@
     },
     {
       "name": "hcloud-remote",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "path": "hcloud-remote/",
       "obviates": [
         "what's the IP of the hetzner box",
@@ -48,7 +48,7 @@
     },
     {
       "name": "hermes-remote",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "path": "hermes-remote/",
       "obviates": [
         "list the hermes crons",
@@ -90,7 +90,7 @@
     },
     {
       "name": "openrouter-remote",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "path": "openrouter-remote/",
       "obviates": [
         "what's my openrouter balance",

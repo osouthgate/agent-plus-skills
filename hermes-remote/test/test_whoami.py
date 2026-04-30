@@ -87,6 +87,7 @@ class TestWhoamiUnconfigured(unittest.TestCase):
     def test_no_env_returns_unconfigured(self):
         out = hr.whoami()
         self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "unconfigured")
         self.assertEqual(out["error"], "unconfigured")
         self.assertIn("HERMES_URL", out["hint"])
 
@@ -99,16 +100,17 @@ class TestWhoamiEnvelope(unittest.TestCase):
         _clear_env()
 
     def test_main_envelope_shape_unconfigured(self):
+        # rc=0 on soft-unconfigured per framework contract.
         buf = io.StringIO()
         with patch("sys.stdout", buf):
-            with self.assertRaises(SystemExit) as cm:
-                with patch("sys.argv", ["hermes-remote", "whoami", "--json"]):
-                    hr.main()
-        self.assertEqual(cm.exception.code, 1)
+            with patch("sys.argv", ["hermes-remote", "whoami", "--json"]):
+                rc = hr.main()
+        self.assertIn(rc, (None, 0))
         out = json.loads(buf.getvalue())
         self.assertEqual(out["tool"]["name"], "hermes-remote")
         self.assertIn("version", out["tool"])
         self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "unconfigured")
 
 
 if __name__ == "__main__":

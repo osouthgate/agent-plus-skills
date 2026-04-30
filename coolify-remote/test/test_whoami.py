@@ -79,6 +79,7 @@ class TestWhoamiUnconfigured(unittest.TestCase):
     def test_no_env_returns_unconfigured(self):
         out = cr.whoami()
         self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "unconfigured")
         self.assertEqual(out["error"], "unconfigured")
         self.assertIn("COOLIFY_URL", out["hint"])
         self.assertEqual(out["configured_keys"], [])
@@ -92,19 +93,23 @@ class TestWhoamiEnvelope(unittest.TestCase):
         _clear_env()
 
     def test_main_envelope_shape_unconfigured(self):
-        # End-to-end: invoke main(['whoami']) and capture stdout. rc=1 on
-        # unconfigured per the documented contract; envelope still has tool.
+        # End-to-end: invoke main(['whoami']) and capture stdout. rc=0 on
+        # soft-unconfigured to match the framework's _run_refresh_handler
+        # contract — rc!=0 is reserved for genuine errors. Envelope still
+        # carries `status: "unconfigured"` and `ok: false`.
         buf = io.StringIO()
         with patch("sys.stdout", buf):
-            with self.assertRaises(SystemExit) as cm:
-                # Patch sys.argv to feed the parser without --env-file noise.
-                with patch("sys.argv", ["coolify-remote", "whoami", "--json"]):
-                    cr.main()
-        self.assertEqual(cm.exception.code, 1)
+            # Patch sys.argv to feed the parser without --env-file noise.
+            with patch("sys.argv", ["coolify-remote", "whoami", "--json"]):
+                rc = cr.main()
+        # main() returns None on the soft path (no SystemExit); some wrappers
+        # historically returned 0 explicitly — accept either.
+        self.assertIn(rc, (None, 0))
         out = json.loads(buf.getvalue())
         self.assertEqual(out["tool"]["name"], "coolify-remote")
         self.assertIn("version", out["tool"])
         self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "unconfigured")
 
 
 if __name__ == "__main__":

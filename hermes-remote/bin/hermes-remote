@@ -622,6 +622,11 @@ def cmd_whoami(args: argparse.Namespace) -> None:
     out = whoami()
     _dump_json(out)
     if not out.get("ok"):
+        # rc=0 for soft "unconfigured" (env vars missing) so the framework's
+        # _run_refresh_handler treats it as a clean unconfigured surface, not
+        # an error. rc=1 still flags genuine failures.
+        if out.get("status") == "unconfigured":
+            return
         sys.exit(1)
 
 
@@ -640,6 +645,7 @@ def whoami() -> dict[str, Any]:
     if not base_url:
         return {
             "ok": False,
+            "status": "unconfigured",
             "error": "unconfigured",
             "hint": "set HERMES_URL (or HERMES_VPS_IP + HERMES_HOST) in project .env or shell env",
             "configured_keys": [k for k, v in (

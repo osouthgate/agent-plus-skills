@@ -617,6 +617,11 @@ def cmd_whoami(args: argparse.Namespace) -> None:
     out = whoami()
     _dump_json(out)
     if not out.get("ok"):
+        # rc=0 for soft "unconfigured" (env vars missing) so the framework's
+        # _run_refresh_handler treats it as a clean unconfigured surface, not
+        # an error. rc=1 still flags genuine failures (HTTP/network).
+        if out.get("status") == "unconfigured":
+            return
         sys.exit(1)
 
 
@@ -627,6 +632,7 @@ def whoami() -> dict[str, Any]:
         missing = [k for k, v in (("COOLIFY_URL", url), ("COOLIFY_API_KEY", key)) if not v]
         return {
             "ok": False,
+            "status": "unconfigured",
             "error": "unconfigured",
             "hint": f"set {', '.join(missing)} in project .env or shell env",
             "configured_keys": [k for k, v in (("COOLIFY_URL", url), ("COOLIFY_API_KEY", key)) if v],

@@ -1,7 +1,7 @@
 {
   "name": "openrouter-remote",
   "description": "CLI for OpenRouter — check balance, list/filter/compare models by price and capabilities, manage API keys via the provisioning endpoint. Designed for both interactive use from Claude Code and for Hermes cron jobs (balance alerts, usage summaries).",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "agent_plus_version": ">=0.7",
   "refresh_handler": {
     "command": "openrouter-remote whoami --json",

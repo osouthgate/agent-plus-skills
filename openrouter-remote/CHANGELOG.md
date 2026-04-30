@@ -4,6 +4,14 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.3.2 - 2026-04-30
+
+### Changed
+- `whoami` now exits rc=0 (with `status: "unconfigured"` in the JSON
+  envelope) when env vars are missing, aligning with the framework's
+  `_run_refresh_handler` contract — rc≠0 is reserved for genuine errors.
+  Matches github-remote's existing convention.
+
 ## 0.3.1 - 2026-04-30
 
 ### Added
