@@ -773,6 +773,56 @@ def cmd_keys_delete(args: argparse.Namespace) -> None:
     print(f"HTTP {status}: deleted {h[:16]}…")
 
 
+# ─── whoami (refresh_handler target) ─────────────────────────────────────────
+
+
+def cmd_whoami(args: argparse.Namespace) -> None:
+    """Identity probe for `agent-plus refresh`. Single GET /key call against
+    OpenRouter's user-key introspection endpoint — returns label + hash for
+    the current key without exposing the secret value. Cheap (sub-second)
+    and works with the same OPENROUTER_API_KEY the wrapper already needs.
+    """
+    out = whoami()
+    _dump_json(out)
+    if not out.get("ok"):
+        sys.exit(1)
+
+
+def whoami() -> dict[str, Any]:
+    token = os.environ.get("OPENROUTER_API_KEY") or ""
+    if not token:
+        return {
+            "ok": False,
+            "error": "unconfigured",
+            "hint": "set OPENROUTER_API_KEY (sk-or-...) in project .env or shell env",
+            "configured_keys": [
+                k for k in ("OPENROUTER_API_KEY", "OPENROUTER_PROVISIONING_KEY")
+                if os.environ.get(k)
+            ],
+        }
+    try:
+        status, data = _http("GET", "/key", token=token, timeout=8.0)
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return {"ok": False, "error": f"network error: {e}", "hint": "check openrouter.ai reachability"}
+    if status >= 300 or not isinstance(data, dict):
+        return {"ok": False, "error": f"HTTP {status} on /key", "hint": "check OPENROUTER_API_KEY"}
+    info = data.get("data") if isinstance(data, dict) else {}
+    if not isinstance(info, dict):
+        info = {}
+    label = info.get("label") or ""
+    # Stable per-key identifier without exposing the secret: SHA-256 of the
+    # token, first 16 hex chars. /key doesn't return a hash and the bearer
+    # token itself can't appear in any envelope (envelope contract test
+    # forbids sk-... patterns).
+    import hashlib
+    key_hash_prefix = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] if token else ""
+    return {
+        "ok": True,
+        "key_label": label or None,
+        "key_hash_prefix": key_hash_prefix or None,
+    }
+
+
 # ─── argparse wiring ──────────────────────────────────────────────────────────
 
 
@@ -923,6 +973,18 @@ def build_parser() -> argparse.ArgumentParser:
     kx.add_argument("key")
     kx.add_argument("-y", "--yes", action="store_true")
     kx.set_defaults(func=cmd_keys_delete)
+
+    # whoami — refresh_handler target.
+    wh = sub.add_parser(
+        "whoami",
+        help="emit identity (key_label, key_hash_prefix) for `agent-plus refresh`",
+    )
+    wh.add_argument(
+        "--json",
+        action="store_true",
+        help="emit JSON (default; flag accepted for explicitness)",
+    )
+    wh.set_defaults(func=cmd_whoami)
 
     return p
 

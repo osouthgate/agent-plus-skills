@@ -608,6 +608,64 @@ def cmd_cron_create(client: HermesClient, args: argparse.Namespace) -> None:
 # agents can invoke it without an admin password.
 
 
+def cmd_whoami(args: argparse.Namespace) -> None:
+    """Identity probe for `agent-plus refresh`. Env-derived only — does NOT
+    invoke the admin login flow (that hits a real password source and is
+    too expensive for a per-workspace refresh tick).
+
+    Surfaces `base_url` (or the VPS_IP/HOST pair if that's the configured
+    form), the configured admin user, and a `configured` boolean reflecting
+    whether a password source is set. No HTTP call — env probe only — so it
+    completes in milliseconds and never depends on the Hermes deployment
+    being reachable.
+    """
+    out = whoami()
+    _dump_json(out)
+    if not out.get("ok"):
+        sys.exit(1)
+
+
+def whoami() -> dict[str, Any]:
+    url = (os.environ.get("HERMES_URL") or "").rstrip("/")
+    vps_ip = os.environ.get("HERMES_VPS_IP") or ""
+    vps_host = os.environ.get("HERMES_HOST") or ""
+    user = os.environ.get("HERMES_ADMIN_USER") or DEFAULT_ADMIN_USER
+
+    base_url = ""
+    if url:
+        base_url = url
+    elif vps_ip and vps_host:
+        base_url = f"http://{vps_ip} (Host: {vps_host})"
+
+    if not base_url:
+        return {
+            "ok": False,
+            "error": "unconfigured",
+            "hint": "set HERMES_URL (or HERMES_VPS_IP + HERMES_HOST) in project .env or shell env",
+            "configured_keys": [k for k, v in (
+                ("HERMES_URL", url),
+                ("HERMES_VPS_IP", vps_ip),
+                ("HERMES_HOST", vps_host),
+            ) if v],
+        }
+
+    has_password = bool(
+        os.environ.get("HERMES_PASSWORD")
+        or os.environ.get("HERMES_PASSWORD_CMD")
+        or (
+            os.environ.get("COOLIFY_URL")
+            and os.environ.get("COOLIFY_API_KEY")
+            and os.environ.get("HERMES_APP_UUID")
+        )
+    )
+    return {
+        "ok": True,
+        "base_url": base_url,
+        "env_user": user,
+        "configured": has_password,
+    }
+
+
 def cmd_chat(args: argparse.Namespace) -> None:
     key = os.environ.get("HERMES_CHAT_API_KEY", "")
     if not key:
@@ -808,6 +866,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the full JSON response instead of just the assistant text",
     )
     ch.set_defaults(func=cmd_chat, needs_client=False)
+
+    # whoami — refresh_handler target. Env-derived only; does not invoke
+    # the admin login flow.
+    wh = sub.add_parser(
+        "whoami",
+        help="emit identity (base_url, env_user, configured) for `agent-plus refresh`",
+    )
+    wh.add_argument(
+        "--json",
+        action="store_true",
+        help="emit JSON (default; flag accepted for explicitness)",
+    )
+    wh.set_defaults(func=cmd_whoami, needs_client=False)
 
     return p
 

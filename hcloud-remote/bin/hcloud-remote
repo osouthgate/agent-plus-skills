@@ -337,6 +337,60 @@ def cmd_snapshot_list(client: HCloudClient, args: argparse.Namespace) -> None:
         print(f"  {str(i.get('id','')):12s} {str(i.get('created','')):22s} {size!s:8s} {cf} — {desc}")
 
 
+def cmd_whoami(args: argparse.Namespace) -> None:
+    """Identity probe for `agent-plus refresh`. Read-only.
+
+    Single GET /servers — same call `server list` makes — so it stays under
+    the 10s timeout and validates that HCLOUD_TOKEN actually authenticates.
+    Returns `token_label` (the env-var name; the token value never leaks
+    out) plus a `default_server` (first by name) and total `server_count`.
+    Hetzner exposes GET /tokens for label introspection, but only on
+    project-scoped tokens with extra perms — we keep this probe single-call.
+    """
+    out = whoami()
+    _dump_json(out)
+    if not out.get("ok"):
+        sys.exit(1)
+
+
+def whoami() -> dict[str, Any]:
+    token = os.environ.get("HCLOUD_TOKEN") or ""
+    if not token:
+        return {
+            "ok": False,
+            "error": "unconfigured",
+            "hint": "set HCLOUD_TOKEN in project .env or shell env",
+            "configured_keys": [],
+        }
+    try:
+        req = urllib.request.Request(
+            f"{API_BASE}/servers?per_page=50",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"HTTP {e.code} on /servers", "hint": "check HCLOUD_TOKEN", "token_label": "HCLOUD_TOKEN"}
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return {"ok": False, "error": f"network error: {e}", "hint": "check api.hetzner.cloud reachability", "token_label": "HCLOUD_TOKEN"}
+
+    try:
+        data = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        data = {}
+    servers = data.get("servers") if isinstance(data, dict) else []
+    if not isinstance(servers, list):
+        servers = []
+    names = sorted(s.get("name", "") for s in servers if isinstance(s, dict) and s.get("name"))
+    return {
+        "ok": True,
+        "token_label": "HCLOUD_TOKEN",
+        "server_count": len(servers),
+        "default_server": names[0] if names else None,
+    }
+
+
 def cmd_ssh(client: HCloudClient, args: argparse.Namespace) -> None:
     server = client.resolve_server(args.server)
     v4, _ = _server_ips(server)
@@ -414,14 +468,29 @@ def build_parser() -> argparse.ArgumentParser:
     sh.add_argument("ssh_args", nargs=argparse.REMAINDER, help="Extra args passed to ssh")
     sh.set_defaults(func=cmd_ssh)
 
+    # whoami — refresh_handler target.
+    wh = sub.add_parser(
+        "whoami",
+        help="emit identity (token_label, default_server, server_count) for `agent-plus refresh`",
+    )
+    wh.add_argument(
+        "--json",
+        action="store_true",
+        help="emit JSON (default; flag accepted for explicitness)",
+    )
+    wh.set_defaults(func=cmd_whoami, needs_client=False)
+
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
     _autoload_env_files(args.env_file)
-    client = HCloudClient()
-    args.func(client, args)
+    if getattr(args, "needs_client", True):
+        client = HCloudClient()
+        args.func(client, args)
+    else:
+        args.func(args)
 
 
 if __name__ == "__main__":

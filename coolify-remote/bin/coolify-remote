@@ -601,6 +601,74 @@ def cmd_server_list(client: CoolifyClient, args: argparse.Namespace) -> None:
         print(f"  {s.get('name',''):24s} {s.get('ip',''):18s} {s.get('uuid','')}")
 
 
+# ─── whoami (refresh_handler target) ──────────────────────────────────────────
+
+
+def cmd_whoami(args: argparse.Namespace) -> None:
+    """Identity probe for `agent-plus refresh`. Read-only. No SSH, no writes.
+
+    Source-of-truth for the COOLIFY_URL + COOLIFY_API_KEY pair the wrapper
+    would use. Single GET /api/v1/servers to validate the credential and
+    surface a `default_server` for the identity record. On unconfigured
+    env or HTTP failure: emits `{ok: false, error, hint}` and exits 1 so
+    the framework's soft-mode handler can report it as an error surface
+    without blowing up.
+    """
+    out = whoami()
+    _dump_json(out)
+    if not out.get("ok"):
+        sys.exit(1)
+
+
+def whoami() -> dict[str, Any]:
+    url = (os.environ.get("COOLIFY_URL") or "").rstrip("/")
+    key = os.environ.get("COOLIFY_API_KEY") or ""
+    if not url or not key:
+        missing = [k for k, v in (("COOLIFY_URL", url), ("COOLIFY_API_KEY", key)) if not v]
+        return {
+            "ok": False,
+            "error": "unconfigured",
+            "hint": f"set {', '.join(missing)} in project .env or shell env",
+            "configured_keys": [k for k, v in (("COOLIFY_URL", url), ("COOLIFY_API_KEY", key)) if v],
+        }
+    # Single low-cost call. Stays under the 10s refresh_handler timeout.
+    try:
+        req = urllib.request.Request(
+            f"{url}/api/v1/servers",
+            headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"HTTP {e.code} on /api/v1/servers", "hint": "check COOLIFY_API_KEY", "base_url": url}
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return {"ok": False, "error": f"network error: {e}", "hint": "check COOLIFY_URL reachability", "base_url": url}
+
+    try:
+        servers = json.loads(raw) if raw else []
+    except json.JSONDecodeError:
+        servers = []
+    if not isinstance(servers, list):
+        servers = []
+    default = ""
+    for s in servers:
+        if isinstance(s, dict) and s.get("is_reachable") and (s.get("is_usable") is not False):
+            default = s.get("name", "") or ""
+            break
+    if not default and servers:
+        first = servers[0]
+        if isinstance(first, dict):
+            default = first.get("name", "") or ""
+    return {
+        "ok": True,
+        "base_url": url,
+        "default_server": default or None,
+        "server_count": len(servers),
+    }
+
+
 # ─── argparse wiring ──────────────────────────────────────────────────────────
 
 
@@ -732,14 +800,31 @@ def build_parser() -> argparse.ArgumentParser:
     sl.add_argument("--json", action="store_true")
     sl.set_defaults(func=cmd_server_list)
 
+    # whoami — refresh_handler target. No client construction (would die on
+    # missing env); env probe lives inside cmd_whoami so unconfigured exits
+    # cleanly with a soft error envelope.
+    wh = sub.add_parser(
+        "whoami",
+        help="emit identity (base_url, default_server, server_count) for `agent-plus refresh`",
+    )
+    wh.add_argument(
+        "--json",
+        action="store_true",
+        help="emit JSON (default; flag accepted for explicitness)",
+    )
+    wh.set_defaults(func=cmd_whoami, needs_client=False)
+
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
     _autoload_env_files(args.env_file)
-    client = CoolifyClient()
-    args.func(client, args)
+    if getattr(args, "needs_client", True):
+        client = CoolifyClient()
+        args.func(client, args)
+    else:
+        args.func(args)
 
 
 if __name__ == "__main__":

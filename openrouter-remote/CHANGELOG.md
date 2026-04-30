@@ -4,6 +4,15 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.3.1 - 2026-04-30
+
+### Added
+- `whoami` subcommand: emits `{ok, key_label, key_hash_prefix}` for the configured OpenRouter credential. Single GET `/key` returns the key's label; `key_hash_prefix` is the SHA-256 prefix of the bearer token (stable identifier, never the secret). Returns `{ok: false, error: "unconfigured", hint, configured_keys}` (rc=1) when OPENROUTER_API_KEY is missing.
+- `refresh_handler` block in `plugin.json` declaring `whoami --json` as the framework's identity-emitting command, with `identity_keys: ["key_label", "key_hash_prefix"]` and `failure_mode: "soft"`.
+
+### Changed
+- Bumped `agent_plus_version` floor to `>=0.7` (the version of the framework that discovers `refresh_handler` from `plugin.json`).
+
 ## 0.3.0 - 2026-04-28
 
 ### Changed

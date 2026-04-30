@@ -4,6 +4,15 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.3.1 — 2026-04-30
+
+### Added
+- `whoami` subcommand: emits `{ok, token_label, default_server, server_count}` for the configured Hetzner credential. Single GET `/servers` validates HCLOUD_TOKEN without leaking the token value. Returns `{ok: false, error: "unconfigured", hint}` (rc=1) when env is missing.
+- `refresh_handler` block in `plugin.json` declaring `whoami --json` as the framework's identity-emitting command, with `identity_keys: ["token_label", "default_server"]` and `failure_mode: "soft"`.
+
+### Changed
+- Bumped `agent_plus_version` floor to `>=0.7` (the version of the framework that discovers `refresh_handler` from `plugin.json`).
+
 ## 0.3.0 — 2026-04-28
 
 ### Changed
