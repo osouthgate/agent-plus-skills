@@ -4,6 +4,23 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.4.0 — 2026-05-01
+
+### Added
+- `cron trigger --wait` (issue #1, Q3 row): blocks until the triggered cron
+  run finishes, then prints final-state JSON with `{status, job_id,
+  completed_runs, job, elapsed_s}`. Exits non-zero on timeout or poll error
+  (canonical `_exit_nonzero` sentinel). Companion flags:
+  - `--timeout SECONDS` — max wait (default 600 s)
+  - `--poll-interval SECONDS` — how often to re-check (default 5 s, floor 2 s)
+
+  Implementation note: Hermes exposes no per-run execution IDs, so `--wait`
+  detects completion by comparing `repeat.completed` before and after the
+  trigger. This is the only available proxy; per-run IDs would allow L3
+  (stream live output) but require a Hermes API change.
+
+  Audit Q3: Level 1 -> Level 2.
+
 ## 0.3.2 — 2026-04-30
 
 ### Changed
