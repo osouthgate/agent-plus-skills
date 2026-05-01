@@ -46,6 +46,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -911,6 +912,153 @@ def _resolve_environment_id(status: dict[str, Any], env_name: Optional[str]) -> 
 
 _FAILURE_STATUSES = {"FAILED", "CRASHED", "ERRORED", "REMOVED"}
 
+# ──────────────────────────── wait helpers ────────────────────────────
+
+# Statuses that indicate a deployment has stopped progressing.
+WAIT_TERMINAL_STATUSES = {"SUCCESS", "FAILED", "CRASHED", "REMOVED", "ERRORED"}
+
+# Default wall-clock budget for --wait. Railway deploys typically take
+# 30–120 s for small services; 300 s covers most real workloads.
+WAIT_DEFAULT_TIMEOUT_SEC = 300
+
+# Minimum polling interval (seconds). Lower means faster feedback but
+# more GraphQL requests against Railway's API.
+WAIT_MIN_POLL_INTERVAL = 5
+
+
+_DEPLOYMENT_STATUS_QUERY = """
+query DeploymentStatus($id: String!) {
+  deployment(id: $id) {
+    id
+    status
+    createdAt
+    updatedAt
+    staticUrl
+    meta
+  }
+}
+"""
+
+
+def wait_for_deployment(
+    deployment_id: str,
+    *,
+    timeout: int = WAIT_DEFAULT_TIMEOUT_SEC,
+    poll_interval: int = WAIT_MIN_POLL_INTERVAL,
+) -> dict[str, Any]:
+    """Block until `deployment_id` reaches a terminal state, then return a
+    result envelope.
+
+    The polling strategy is:
+      1. GraphQL ``deployment(id)`` query (requires RAILWAY_API_TOKEN).
+      2. If no token is available, falls back to ``railway status --json``
+         which exposes the latest deployment's status for the linked service.
+
+    Return shape (all outcomes):
+      {
+        "status":        "success" | "error" | "timeout" | "poll_error",
+        "deployment_id": str,
+        "final_state":   dict | None,   # slim deployment node
+        "elapsed_s":     int,
+        "_exit_nonzero": bool,          # True on non-success outcomes
+      }
+
+    Three failure modes:
+      success     — deployment reached SUCCESS within the timeout.
+      error       — deployment reached a failure terminal state.
+      timeout     — budget exhausted before a terminal state was reached.
+    """
+    poll = max(WAIT_MIN_POLL_INTERVAL, poll_interval)
+    start = time.monotonic()
+    last_state: Optional[dict[str, Any]] = None
+
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout:
+            return {
+                "status": "timeout",
+                "deployment_id": deployment_id,
+                "final_state": last_state,
+                "elapsed_s": int(elapsed),
+                "_exit_nonzero": True,
+            }
+
+        # --- primary path: GraphQL ---
+        node = _poll_deployment_graphql(deployment_id)
+
+        # --- fallback path: railway status --json ---
+        if node is None:
+            node = _poll_deployment_cli(deployment_id)
+
+        if node is None:
+            # Can't determine status at all; surface as poll_error.
+            elapsed = time.monotonic() - start
+            return {
+                "status": "poll_error",
+                "deployment_id": deployment_id,
+                "error": (
+                    "could not determine deployment status: no RAILWAY_API_TOKEN "
+                    "and `railway status --json` did not match the given deployment id"
+                ),
+                "final_state": last_state,
+                "elapsed_s": int(elapsed),
+                "_exit_nonzero": True,
+            }
+
+        slim = _slim_deploy(node)
+        last_state = slim
+        deploy_status = (node.get("status") or "").upper()
+
+        if deploy_status in WAIT_TERMINAL_STATUSES:
+            elapsed = time.monotonic() - start
+            is_success = deploy_status == "SUCCESS"
+            return {
+                "status": "success" if is_success else "error",
+                "deployment_id": deployment_id,
+                "final_state": slim,
+                "elapsed_s": int(elapsed),
+                **({"_exit_nonzero": True} if not is_success else {}),
+            }
+
+        # Not terminal yet — sleep and retry.
+        time.sleep(poll)
+
+
+def _poll_deployment_graphql(deployment_id: str) -> Optional[dict[str, Any]]:
+    """Fetch a single deployment node from GraphQL. Returns None on any failure
+    (no token, network error, schema drift). Callers use None as the signal to
+    fall back to CLI polling."""
+    data = _graphql_request(_DEPLOYMENT_STATUS_QUERY, {"id": deployment_id})
+    if not data:
+        return None
+    return data.get("deployment")
+
+
+def _poll_deployment_cli(deployment_id: str) -> Optional[dict[str, Any]]:
+    """Best-effort: call ``railway status --json`` and return a synthetic
+    deployment node if it references ``deployment_id``. Returns None when the
+    CLI output doesn't mention that deployment (different context, no link, etc.).
+
+    This is intentionally weak — it only works for the currently-linked
+    project/service. Its purpose is to keep --wait usable in the common case
+    where no RAILWAY_API_TOKEN is set."""
+    rc, out, _err = railway(["status", "--json"], timeout=15)
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    # `railway status --json` may expose a `latestDeployment` or `deployment`
+    # key depending on CLI version. Try both spellings.
+    for key in ("deployment", "latestDeployment"):
+        dep = data.get(key)
+        if isinstance(dep, dict) and dep.get("id") == deployment_id:
+            return dep
+    return None
+
 
 def _summarize_snapshots(snapshots: list[dict[str, Any]]) -> dict[str, int]:
     """Compute totals across service snapshots for the top-level `summary` field.
@@ -1344,6 +1492,65 @@ def cmd_build_logs(args: argparse.Namespace) -> None:
     }, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
+def cmd_wait(args: argparse.Namespace) -> None:
+    """Block until a Railway deployment reaches a terminal state.
+
+    Resolution order for the target deployment:
+      1. --deployment <id> if passed (no prerequisite check needed).
+      2. Most recent deployment for the linked service (needs a linked
+         project; resolved via railway status + GraphQL).
+
+    Emits a single JSON result envelope:
+      {status, deployment_id, final_state, elapsed_s}
+
+    Exits non-zero when the deployment failed, timed out, or the status
+    could not be determined.
+    """
+    check_prereqs()
+
+    deployment_id: Optional[str] = getattr(args, "deployment", None)
+
+    if not deployment_id:
+        # Resolve from the linked service.
+        _resolve_cli_env(args)
+        status = get_status()
+        env_id = _resolve_environment_id(status, getattr(args, "env", None))
+        svc_name: Optional[str] = getattr(args, "service", None)
+        services = list_services(getattr(args, "env", None))
+        if svc_name:
+            svc = next(
+                (s for s in services if (s.get("name") or "").lower() == svc_name.lower()),
+                None,
+            )
+        else:
+            svc = services[0] if services else None
+        if not svc:
+            die("could not resolve a service — pass --deployment <id> or link a project")
+
+        history = fetch_deploy_history(svc.get("id"), env_id)
+        if history:
+            deployment_id = (history[0] or {}).get("id")
+        if not deployment_id:
+            # Fall back to CLI deploymentId field.
+            deployment_id = svc.get("deploymentId")
+        if not deployment_id:
+            die(
+                "could not determine deployment id — pass --deployment <id> "
+                "or set RAILWAY_API_TOKEN so deploy history is resolvable"
+            )
+
+    result = wait_for_deployment(
+        deployment_id,
+        timeout=args.timeout,
+        poll_interval=args.poll_interval,
+    )
+
+    exit_nonzero = result.pop("_exit_nonzero", False)
+    emit(result, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
+    if exit_nonzero:
+        sys.exit(1)
+
+
 def cmd_envs(args: argparse.Namespace) -> None:
     check_prereqs()
     _resolve_cli_env(args)
@@ -1470,6 +1677,54 @@ def build_parser() -> argparse.ArgumentParser:
     bl.add_argument("--lines", type=int, default=200,
                     help="max build-log lines to emit (default: 200)")
 
+    wt = sub.add_parser(
+        "wait",
+        help=(
+            "block until a deployment reaches a terminal state "
+            "(SUCCESS / FAILED / CRASHED / REMOVED). "
+            "Returns final-state JSON; exits non-zero on failure or timeout."
+        ),
+    )
+    _add_globals(wt)
+    wt.add_argument(
+        "--deployment",
+        metavar="ID",
+        help=(
+            "deployment id to wait on. If omitted, resolves the most recent "
+            "deployment for the linked service (requires a linked project and, "
+            "for accurate resolution, RAILWAY_API_TOKEN)."
+        ),
+    )
+    wt.add_argument(
+        "--service",
+        help="service name to resolve the deployment from (used when --deployment is omitted)",
+    )
+    wt.add_argument(
+        "--env",
+        help="Railway environment name (used when --deployment is omitted)",
+    )
+    wt.add_argument(
+        "--timeout",
+        type=int,
+        default=WAIT_DEFAULT_TIMEOUT_SEC,
+        metavar="SECONDS",
+        help=(
+            f"wall-clock budget in seconds before declaring a timeout "
+            f"(default: {WAIT_DEFAULT_TIMEOUT_SEC})"
+        ),
+    )
+    wt.add_argument(
+        "--poll-interval",
+        type=int,
+        default=WAIT_MIN_POLL_INTERVAL,
+        dest="poll_interval",
+        metavar="SECONDS",
+        help=(
+            f"seconds between status polls "
+            f"(default: {WAIT_MIN_POLL_INTERVAL}, minimum: {WAIT_MIN_POLL_INTERVAL})"
+        ),
+    )
+
     ev = sub.add_parser("envs", help="env var NAMES only for one service (values stripped)")
     _add_globals(ev)
     ev.add_argument("service")
@@ -1501,6 +1756,7 @@ DISPATCH = {
     "status": cmd_status,
     "errors": cmd_errors,
     "build-logs": cmd_build_logs,
+    "wait": cmd_wait,
     "envs": cmd_envs,
     "services": cmd_services,
     "projects": cmd_projects,
