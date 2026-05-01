@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,6 +34,16 @@ from pathlib import Path
 from typing import Any
 
 API_BASE = "https://api.hetzner.cloud/v1"
+
+# Action-wait constants — snapshots can take 5+ minutes on large disks.
+WAIT_DEFAULT_TIMEOUT = 600
+WAIT_DEFAULT_POLL_INTERVAL = 5
+WAIT_MIN_POLL_INTERVAL = 2
+
+
+def _is_int(s: str) -> bool:
+    """Return True if *s* is a non-empty string of ASCII digits."""
+    return bool(s) and s.isdigit()
 
 # ─── tool identity ────────────────────────────────────────────────────────────
 # Every JSON payload this tool emits carries a top-level `tool: {name, version}`
@@ -212,6 +223,108 @@ class HCloudClient:
         names = ", ".join(sorted(s.get("name", "?") for s in servers)) or "(none)"
         raise SystemExit(f"No server matching {ident!r}. Known servers: {names}")
 
+    def resolve_image(self, ident: str) -> dict:
+        """Resolve an image by numeric id or name.
+
+        Accepts a numeric id string or a name string. Uses Hetzner's
+        ``?name=`` filter for name lookups (server-side filter, single result).
+        Returns the image dict or raises SystemExit with known names listed.
+
+        Note: Hetzner Cloud has no separate project concept -- the API token
+        is already scoped to exactly one project. There is nothing to resolve.
+        """
+        if _is_int(ident):
+            status, data = self.call("GET", f"/images/{ident}")
+            if status == 200 and isinstance(data, dict):
+                img = data.get("image")
+                if img:
+                    return img
+            raise SystemExit(f"No image with id {ident!r}")
+        # Name lookup -- Hetzner supports ?name= filter on /images
+        status, data = self.call("GET", "/images", query={"name": ident})
+        if status == 200 and isinstance(data, dict):
+            images = data.get("images", [])
+            if images:
+                return images[0]
+        # Fallback: list all and show known names for the error message
+        status2, data2 = self.call("GET", "/images", query={"per_page": 50})
+        known: list[str] = []
+        if status2 == 200 and isinstance(data2, dict):
+            known = sorted(
+                i.get("name") or i.get("description") or str(i.get("id", ""))
+                for i in data2.get("images", [])
+            )
+        names = ", ".join(known) or "(none)"
+        raise SystemExit(f"No image matching {ident!r}. Known images: {names}")
+
+    def wait_action(
+        self,
+        action_id: int,
+        *,
+        timeout: int,
+        poll_interval: int,
+    ) -> dict[str, Any]:
+        """Poll GET /actions/{action_id} until done, timeout, or error.
+
+        Hetzner action statuses: ``running`` (keep polling), ``success``
+        (done, ok), ``error`` (done, exit non-zero).
+
+        Returns a dict with at minimum ``{status, elapsed_s}``.
+        On timeout: ``{status: "timeout", last_state, elapsed_s, _exit_nonzero: True}``.
+        On action error: ``{status: "error", error_code, error_message, elapsed_s, _exit_nonzero: True}``.
+        On success: ``{status: "success", action, elapsed_s}``.
+        """
+        poll = max(WAIT_MIN_POLL_INTERVAL, poll_interval)
+        start = time.monotonic()
+        last: dict[str, Any] = {}
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= timeout:
+                return {
+                    "status": "timeout",
+                    "last_state": last or None,
+                    "elapsed_s": int(elapsed),
+                    "action_id": action_id,
+                    "_exit_nonzero": True,
+                }
+            try:
+                status, data = self.call("GET", f"/actions/{action_id}")
+            except Exception as exc:
+                return {
+                    "status": "poll_error",
+                    "error": str(exc),
+                    "action_id": action_id,
+                    "_exit_nonzero": True,
+                }
+            if status >= 300 or not isinstance(data, dict):
+                return {
+                    "status": "poll_error",
+                    "error": f"HTTP {status}",
+                    "action_id": action_id,
+                    "_exit_nonzero": True,
+                }
+            action = data.get("action") or {}
+            last = action
+            action_status = action.get("status")
+            if action_status == "success":
+                return {
+                    "status": "success",
+                    "action": action,
+                    "elapsed_s": int(time.monotonic() - start),
+                }
+            if action_status == "error":
+                err = action.get("error") or {}
+                return {
+                    "status": "error",
+                    "error_code": err.get("code"),
+                    "error_message": err.get("message"),
+                    "action": action,
+                    "elapsed_s": int(time.monotonic() - start),
+                    "_exit_nonzero": True,
+                }
+            # Still running -- sleep and poll again
+            time.sleep(poll)
+
 
 # ─── pretty printers ──────────────────────────────────────────────────────────
 
@@ -282,6 +395,20 @@ def cmd_server_reboot(client: HCloudClient, args: argparse.Namespace) -> None:
         sys.exit(1)
     action = (data or {}).get("action") or {}
     print(f"HTTP {status}: reboot queued (action {action.get('id')}, status {action.get('status')})")
+    if args.wait:
+        action_id = action.get("id")
+        if not action_id:
+            print("Warning: no action id returned; cannot wait", file=sys.stderr)
+            return
+        print(f"Waiting for action {action_id} (timeout {args.timeout}s) ...")
+        result = client.wait_action(
+            action_id,
+            timeout=args.timeout,
+            poll_interval=args.poll_interval,
+        )
+        _dump_json(result)
+        if result.get("_exit_nonzero"):
+            sys.exit(1)
 
 
 def cmd_snapshot_create(client: HCloudClient, args: argparse.Namespace) -> None:
@@ -302,7 +429,22 @@ def cmd_snapshot_create(client: HCloudClient, args: argparse.Namespace) -> None:
     print(f"  image id:    {image.get('id')}")
     print(f"  description: {image.get('description') or args.description or '-'}")
     print(f"  action:      {action.get('id')} ({action.get('status')})")
-    print("  (snapshot runs in background; use `hcloud-remote snapshot list` to check)")
+    if not args.wait:
+        print("  (snapshot runs in background; use `hcloud-remote snapshot list` to check)")
+    else:
+        action_id = action.get("id")
+        if not action_id:
+            print("Warning: no action id returned; cannot wait", file=sys.stderr)
+            return
+        print(f"Waiting for action {action_id} (timeout {args.timeout}s) ...")
+        result = client.wait_action(
+            action_id,
+            timeout=args.timeout,
+            poll_interval=args.poll_interval,
+        )
+        _dump_json(result)
+        if result.get("_exit_nonzero"):
+            sys.exit(1)
 
 
 def cmd_snapshot_list(client: HCloudClient, args: argparse.Namespace) -> None:
@@ -451,6 +593,11 @@ def build_parser() -> argparse.ArgumentParser:
     sr = srv_sub.add_parser("reboot", help="Soft-reboot a server")
     sr.add_argument("server")
     sr.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    sr.add_argument("--wait", action="store_true", help="Block until reboot action completes")
+    sr.add_argument("--timeout", type=int, default=WAIT_DEFAULT_TIMEOUT,
+                    help=f"Max seconds to wait (default: {WAIT_DEFAULT_TIMEOUT})")
+    sr.add_argument("--poll-interval", type=int, default=WAIT_DEFAULT_POLL_INTERVAL,
+                    help=f"Poll interval in seconds (default: {WAIT_DEFAULT_POLL_INTERVAL})")
     sr.set_defaults(func=cmd_server_reboot)
 
     # snapshot
@@ -460,6 +607,11 @@ def build_parser() -> argparse.ArgumentParser:
     sc = snap_sub.add_parser("create", help="Create a snapshot of a server")
     sc.add_argument("server")
     sc.add_argument("--description", help="Snapshot description (optional)")
+    sc.add_argument("--wait", action="store_true", help="Block until snapshot action completes")
+    sc.add_argument("--timeout", type=int, default=WAIT_DEFAULT_TIMEOUT,
+                    help=f"Max seconds to wait (default: {WAIT_DEFAULT_TIMEOUT})")
+    sc.add_argument("--poll-interval", type=int, default=WAIT_DEFAULT_POLL_INTERVAL,
+                    help=f"Poll interval in seconds (default: {WAIT_DEFAULT_POLL_INTERVAL})")
     sc.set_defaults(func=cmd_snapshot_create)
 
     sls = snap_sub.add_parser("list", help="List snapshots")

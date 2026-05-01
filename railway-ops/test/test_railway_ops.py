@@ -1142,5 +1142,208 @@ class TestWhoami(unittest.TestCase):
         self.assertNotIn("RAILWAY_API_TOKEN", blob)
 
 
+# ──────────────────────────── wait_for_deployment ────────────────────────────
+
+
+class TestWaitForDeployment(unittest.TestCase):
+    """Tests for the L2 wait helper. Stubs out _graphql_request and time.sleep
+    so the suite runs instantly without network calls or real delays."""
+
+    def _make_node(self, status: str, dep_id: str = "d-abc") -> dict:
+        return {
+            "id": dep_id,
+            "status": status,
+            "createdAt": "2026-05-01T10:00:00Z",
+            "updatedAt": "2026-05-01T10:01:00Z",
+            "staticUrl": None,
+            "meta": {},
+        }
+
+    def test_success_returns_success_status(self) -> None:
+        """When the first poll returns SUCCESS the result envelope carries
+        status='success' with the slim deployment node."""
+        node = self._make_node("SUCCESS")
+
+        def fake_graphql(query, variables, **kw):
+            return {"deployment": node}
+
+        with patch.object(ro, "_graphql_request", fake_graphql), \
+             patch("time.sleep"):
+            result = ro.wait_for_deployment("d-abc", timeout=60, poll_interval=1)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["deployment_id"], "d-abc")
+        self.assertIsNotNone(result["final_state"])
+        self.assertEqual(result["final_state"]["id"], "d-abc")
+        self.assertFalse(result.get("_exit_nonzero", False))
+
+    def test_failed_deploy_returns_error_status(self) -> None:
+        """A deployment that reaches FAILED should return status='error'
+        with _exit_nonzero=True."""
+        node = self._make_node("FAILED")
+
+        def fake_graphql(query, variables, **kw):
+            return {"deployment": node}
+
+        with patch.object(ro, "_graphql_request", fake_graphql), \
+             patch("time.sleep"):
+            result = ro.wait_for_deployment("d-abc", timeout=60, poll_interval=1)
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(result.get("_exit_nonzero"))
+
+    def test_crashed_deploy_returns_error_status(self) -> None:
+        node = self._make_node("CRASHED")
+
+        def fake_graphql(query, variables, **kw):
+            return {"deployment": node}
+
+        with patch.object(ro, "_graphql_request", fake_graphql), \
+             patch("time.sleep"):
+            result = ro.wait_for_deployment("d-abc", timeout=60, poll_interval=1)
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(result.get("_exit_nonzero"))
+
+    def test_timeout_when_never_terminal(self) -> None:
+        """When the deployment never enters a terminal state and the budget
+        expires, the result should have status='timeout'."""
+        import time as _time
+
+        node = self._make_node("BUILDING")
+
+        def fake_graphql(query, variables, **kw):
+            return {"deployment": node}
+
+        monotonic_calls = [0]
+
+        def fake_monotonic():
+            monotonic_calls[0] += 1
+            # Return 0 on first call (the `start = time.monotonic()` line),
+            # then return a value past the timeout on subsequent calls.
+            if monotonic_calls[0] == 1:
+                return 0.0
+            return 10.0  # well past the 5 s timeout we'll use
+
+        def fake_sleep(n):
+            pass
+
+        with patch.object(ro, "_graphql_request", fake_graphql), \
+             patch.object(_time, "sleep", fake_sleep), \
+             patch.object(_time, "monotonic", fake_monotonic):
+            result = ro.wait_for_deployment("d-abc", timeout=5, poll_interval=1)
+
+        self.assertEqual(result["status"], "timeout")
+        self.assertTrue(result.get("_exit_nonzero"))
+        self.assertEqual(result["deployment_id"], "d-abc")
+
+    def test_graphql_fallback_to_cli_when_no_token(self) -> None:
+        """When GraphQL returns None (no token), the CLI fallback is tried.
+        A matching deployment id in `railway status` output resolves correctly."""
+        node = self._make_node("SUCCESS")
+        cli_status_output = json.dumps({"deployment": node})
+
+        def fake_graphql(query, variables, **kw):
+            return None  # simulate no token / failure
+
+        stub = StubRunner({
+            ("status", "--json"): (0, cli_status_output, ""),
+        })
+
+        with patch.object(ro, "_graphql_request", fake_graphql), \
+             patch.object(ro, "run_cmd", stub), \
+             patch("time.sleep"):
+            result = ro.wait_for_deployment("d-abc", timeout=60, poll_interval=1)
+
+        self.assertEqual(result["status"], "success")
+
+    def test_poll_error_when_both_paths_unavailable(self) -> None:
+        """When GraphQL returns None AND CLI status doesn't mention the id,
+        wait_for_deployment returns a poll_error envelope immediately."""
+
+        def fake_graphql(query, variables, **kw):
+            return None
+
+        stub = StubRunner({
+            ("status", "--json"): (0, json.dumps({"name": "some-project"}), ""),
+        })
+
+        with patch.object(ro, "_graphql_request", fake_graphql), \
+             patch.object(ro, "run_cmd", stub), \
+             patch("time.sleep"):
+            result = ro.wait_for_deployment("d-missing", timeout=60, poll_interval=1)
+
+        self.assertEqual(result["status"], "poll_error")
+        self.assertTrue(result.get("_exit_nonzero"))
+        self.assertIn("error", result)
+
+    def test_polls_until_terminal(self) -> None:
+        """Verify that the poller keeps going while status is non-terminal, then
+        stops once it reaches SUCCESS."""
+        responses = iter([
+            {"deployment": self._make_node("BUILDING")},
+            {"deployment": self._make_node("DEPLOYING")},
+            {"deployment": self._make_node("SUCCESS")},
+        ])
+
+        def fake_graphql(query, variables, **kw):
+            return next(responses)
+
+        with patch.object(ro, "_graphql_request", fake_graphql), \
+             patch("time.sleep"):
+            result = ro.wait_for_deployment("d-abc", timeout=300, poll_interval=1)
+
+        self.assertEqual(result["status"], "success")
+
+    def test_result_envelope_keys_stable(self) -> None:
+        """The result envelope must always carry {status, deployment_id,
+        final_state, elapsed_s} regardless of outcome."""
+        node = self._make_node("SUCCESS")
+
+        def fake_graphql(query, variables, **kw):
+            return {"deployment": node}
+
+        with patch.object(ro, "_graphql_request", fake_graphql), \
+             patch("time.sleep"):
+            result = ro.wait_for_deployment("d-abc", timeout=60, poll_interval=1)
+
+        for key in ("status", "deployment_id", "final_state", "elapsed_s"):
+            self.assertIn(key, result, f"missing key: {key}")
+
+
+class TestWaitArgparse(unittest.TestCase):
+    """CLI surface contract for the wait subcommand."""
+
+    def test_wait_accepts_deployment_flag(self) -> None:
+        parser = ro.build_parser()
+        args = parser.parse_args(["wait", "--deployment", "d-abc123"])
+        self.assertEqual(args.cmd, "wait")
+        self.assertEqual(args.deployment, "d-abc123")
+
+    def test_wait_defaults(self) -> None:
+        parser = ro.build_parser()
+        args = parser.parse_args(["wait", "--deployment", "d-x"])
+        self.assertEqual(args.timeout, ro.WAIT_DEFAULT_TIMEOUT_SEC)
+        self.assertEqual(args.poll_interval, ro.WAIT_MIN_POLL_INTERVAL)
+
+    def test_wait_custom_timeout_and_poll(self) -> None:
+        parser = ro.build_parser()
+        args = parser.parse_args([
+            "wait", "--deployment", "d-x",
+            "--timeout", "120",
+            "--poll-interval", "10",
+        ])
+        self.assertEqual(args.timeout, 120)
+        self.assertEqual(args.poll_interval, 10)
+
+    def test_wait_without_deployment_parses(self) -> None:
+        # When --deployment is omitted, the command resolves via linked context.
+        parser = ro.build_parser()
+        args = parser.parse_args(["wait", "--service", "api", "--env", "production"])
+        self.assertIsNone(args.deployment)
+        self.assertEqual(args.service, "api")
+        self.assertEqual(args.env, "production")
+
+
 if __name__ == "__main__":
     unittest.main()

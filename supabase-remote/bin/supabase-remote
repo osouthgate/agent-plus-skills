@@ -47,11 +47,26 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+# Project-wait constants — project create/restore can take 2-5 minutes.
+WAIT_DEFAULT_TIMEOUT = 600
+WAIT_DEFAULT_POLL_INTERVAL = 10
+WAIT_MIN_POLL_INTERVAL = 5
+
+# Terminal statuses for a Supabase project.
+_PROJECT_ACTIVE_STATUSES = frozenset({"ACTIVE_HEALTHY"})
+_PROJECT_FAIL_STATUSES = frozenset({
+    "INIT_FAILED",
+    "INACTIVE",
+    "RESTORE_FAILED",
+    "UNKNOWN",
+})
 
 API_BASE = "https://api.supabase.com/v1"
 
@@ -292,6 +307,103 @@ def _fetch_projects(debug: bool = False) -> list:
             f"Unexpected response from /v1/projects: {_scrub(json.dumps(data))}"
         )
     return data
+
+
+def _fetch_project(ref: str, *, debug: bool = False) -> dict:
+    """Fetch a single project by ref. Returns the project dict."""
+    status, data = _api_call("GET", f"/projects/{ref}", debug=debug)
+    if status >= 300:
+        raise SystemExit(
+            f"GET /v1/projects/{ref} failed: HTTP {status}: {_scrub(json.dumps(data))}"
+        )
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"Unexpected response from /v1/projects/{ref}: {_scrub(json.dumps(data))}"
+        )
+    return data
+
+
+def wait_project_active(
+    ref: str,
+    *,
+    timeout: float = WAIT_DEFAULT_TIMEOUT,
+    poll_interval: float = WAIT_DEFAULT_POLL_INTERVAL,
+    debug: bool = False,
+) -> dict:
+    """Poll GET /v1/projects/{ref} until the project reaches a terminal status.
+
+    Terminal states:
+      - ACTIVE_HEALTHY  -> success
+      - INIT_FAILED / RESTORE_FAILED / INACTIVE / UNKNOWN -> error
+      - timeout exceeded before any terminal state -> timeout
+
+    Returns a result dict with keys:
+      status         : "success" | "error" | "timeout"
+      project_status : last observed status string
+      ref            : project ref
+      elapsed_s      : integer seconds elapsed
+      project        : full project dict on success/error
+      _exit_nonzero  : True when the caller should sys.exit(1)
+    """
+    poll = max(WAIT_MIN_POLL_INTERVAL, poll_interval)
+    start = time.monotonic()
+    last_status: str = ""
+    last_data: dict = {}
+
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout:
+            return {
+                "status": "timeout",
+                "project_status": last_status or None,
+                "ref": ref,
+                "elapsed_s": int(elapsed),
+                "project": last_data or None,
+                "_exit_nonzero": True,
+            }
+
+        try:
+            data = _fetch_project(ref, debug=debug)
+        except SystemExit as exc:
+            return {
+                "status": "poll_error",
+                "error": str(exc),
+                "ref": ref,
+                "elapsed_s": int(time.monotonic() - start),
+                "_exit_nonzero": True,
+            }
+
+        proj_status: str = data.get("status") or ""
+        last_status = proj_status
+        last_data = data
+
+        if debug:
+            sys.stderr.write(
+                f"[debug] wait_project_active ref={ref} status={proj_status!r} "
+                f"elapsed={int(elapsed)}s\n"
+            )
+
+        if proj_status in _PROJECT_ACTIVE_STATUSES:
+            return {
+                "status": "success",
+                "project_status": proj_status,
+                "ref": ref,
+                "elapsed_s": int(time.monotonic() - start),
+                "project": data,
+            }
+
+        if proj_status in _PROJECT_FAIL_STATUSES:
+            return {
+                "status": "error",
+                "project_status": proj_status,
+                "ref": ref,
+                "elapsed_s": int(time.monotonic() - start),
+                "project": data,
+                "_exit_nonzero": True,
+            }
+
+        # Still transitioning — sleep then poll again.
+        time.sleep(poll)
 
 
 def _resolve_project_ref_with_source(
@@ -566,6 +678,102 @@ def cmd_projects_current(args: argparse.Namespace) -> None:
     print(f"source: {source_label}")
     if raw and raw != ref:
         print(f"input:  {raw}")
+
+
+def cmd_projects_create(args: argparse.Namespace) -> None:
+    """POST /v1/projects to create a new Supabase project.
+
+    The Management API returns immediately with status COMING_UP. With --wait,
+    this command polls GET /v1/projects/{ref} until the project reaches
+    ACTIVE_HEALTHY (success) or a failure terminal state.
+    """
+    body: dict[str, Any] = {
+        "name": args.name,
+        "organization_id": args.org_id,
+        "db_pass": args.db_pass,
+        "region": args.region,
+        "plan": args.plan or "free",
+    }
+    # Omit None values so we don't accidentally override API defaults.
+    body = {k: v for k, v in body.items() if v is not None}
+
+    if args.debug:
+        sys.stderr.write(f"[debug] POST /v1/projects name={args.name!r}\n")
+
+    status, data = _api_call("POST", "/projects", body=body, debug=args.debug)
+    if status >= 300:
+        raise SystemExit(
+            f"POST /v1/projects failed: HTTP {status}: {_scrub(json.dumps(data))}"
+        )
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"Unexpected response from POST /v1/projects: {_scrub(json.dumps(data))}"
+        )
+
+    if not args.wait:
+        _dump_json(data)
+        return
+
+    ref = data.get("id") or data.get("ref") or ""
+    if not ref:
+        raise SystemExit(
+            "POST /v1/projects succeeded but response contained no 'id'/'ref'. "
+            f"Cannot poll. Raw response: {_scrub(json.dumps(data))}"
+        )
+
+    sys.stderr.write(
+        f"Project {ref!r} created with status {data.get('status')!r}. "
+        f"Waiting up to {args.timeout}s for ACTIVE_HEALTHY...\n"
+    )
+    result = wait_project_active(
+        ref,
+        timeout=args.timeout,
+        poll_interval=args.poll_interval,
+        debug=args.debug,
+    )
+    exit_nonzero = result.pop("_exit_nonzero", False)
+    _dump_json(result)
+    if exit_nonzero:
+        sys.exit(1)
+
+
+def cmd_projects_restore(args: argparse.Namespace) -> None:
+    """POST /v1/projects/{ref}/restore to restore a paused project.
+
+    The Management API returns immediately. With --wait, this command polls
+    GET /v1/projects/{ref} until the project reaches ACTIVE_HEALTHY or a
+    failure terminal state.
+    """
+    ref = _resolve_project_ref(args.project, debug=args.debug)
+
+    if args.debug:
+        sys.stderr.write(f"[debug] POST /v1/projects/{ref}/restore\n")
+
+    status, data = _api_call("POST", f"/projects/{ref}/restore", debug=args.debug)
+    if status >= 300:
+        raise SystemExit(
+            f"POST /v1/projects/{ref}/restore failed: "
+            f"HTTP {status}: {_scrub(json.dumps(data))}"
+        )
+
+    if not args.wait:
+        _dump_json(data if isinstance(data, dict) else {"ref": ref, "raw": data})
+        return
+
+    sys.stderr.write(
+        f"Restore initiated for project {ref!r}. "
+        f"Waiting up to {args.timeout}s for ACTIVE_HEALTHY...\n"
+    )
+    result = wait_project_active(
+        ref,
+        timeout=args.timeout,
+        poll_interval=args.poll_interval,
+        debug=args.debug,
+    )
+    exit_nonzero = result.pop("_exit_nonzero", False)
+    _dump_json(result)
+    if exit_nonzero:
+        sys.exit(1)
 
 
 # ─── subcommands: sql ─────────────────────────────────────────────────────────
@@ -886,6 +1094,86 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format (default: text).",
     )
     pc.set_defaults(func=cmd_projects_current)
+
+    # projects create
+    pcr = proj_sub.add_parser(
+        "create",
+        help="Create a new Supabase project (POST /v1/projects). "
+             "Returns immediately unless --wait is passed.",
+        epilog="Example:\n"
+               "  supabase-remote projects create --name my-project --org-id org_abc123 "
+               "--db-pass s3cret --region eu-west-1 --wait\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    pcr.add_argument("--name", required=True, help="Project name.")
+    pcr.add_argument("--org-id", required=True, dest="org_id",
+                     help="Organization ID (e.g. org_abc123).")
+    pcr.add_argument("--db-pass", required=True, dest="db_pass",
+                     help="Database password for the new project.")
+    pcr.add_argument("--region", required=True,
+                     help="Deployment region (e.g. eu-west-1, us-east-1).")
+    pcr.add_argument("--plan", default="free",
+                     help="Billing plan: free | pro (default: free).")
+    pcr.add_argument(
+        "--wait",
+        action="store_true",
+        help="Block until the project reaches ACTIVE_HEALTHY. "
+             "Exits 1 on failure or timeout.",
+    )
+    pcr.add_argument(
+        "--timeout",
+        type=float,
+        default=WAIT_DEFAULT_TIMEOUT,
+        metavar="SECONDS",
+        help=f"Maximum seconds to wait (default: {WAIT_DEFAULT_TIMEOUT}). "
+             "Ignored unless --wait is set.",
+    )
+    pcr.add_argument(
+        "--poll-interval",
+        type=float,
+        default=WAIT_DEFAULT_POLL_INTERVAL,
+        dest="poll_interval",
+        metavar="SECONDS",
+        help=f"Polling interval in seconds (default: {WAIT_DEFAULT_POLL_INTERVAL}). "
+             "Ignored unless --wait is set.",
+    )
+    pcr.set_defaults(func=cmd_projects_create)
+
+    # projects restore
+    prs = proj_sub.add_parser(
+        "restore",
+        help="Restore a paused Supabase project (POST /v1/projects/{ref}/restore). "
+             "Returns immediately unless --wait is passed.",
+        epilog="Example:\n"
+               "  supabase-remote projects restore --project myproj --wait\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    prs.add_argument("--project", required=True,
+                     help="Project name or ref of the paused project to restore.")
+    prs.add_argument(
+        "--wait",
+        action="store_true",
+        help="Block until the project reaches ACTIVE_HEALTHY. "
+             "Exits 1 on failure or timeout.",
+    )
+    prs.add_argument(
+        "--timeout",
+        type=float,
+        default=WAIT_DEFAULT_TIMEOUT,
+        metavar="SECONDS",
+        help=f"Maximum seconds to wait (default: {WAIT_DEFAULT_TIMEOUT}). "
+             "Ignored unless --wait is set.",
+    )
+    prs.add_argument(
+        "--poll-interval",
+        type=float,
+        default=WAIT_DEFAULT_POLL_INTERVAL,
+        dest="poll_interval",
+        metavar="SECONDS",
+        help=f"Polling interval in seconds (default: {WAIT_DEFAULT_POLL_INTERVAL}). "
+             "Ignored unless --wait is set.",
+    )
+    prs.set_defaults(func=cmd_projects_restore)
 
     # sql
     sq = sub.add_parser(

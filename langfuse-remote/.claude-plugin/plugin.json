@@ -1,7 +1,7 @@
 {
   "name": "langfuse-remote",
   "description": "Remote CLI for managing a Langfuse instance (cloud or self-hosted) — export/import prompts for backup and cross-env migration, smoke-test trace ingestion, health checks across multiple instances.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "agent_plus_version": ">=0.7",
   "author": {
     "name": "Oliver Southgate",

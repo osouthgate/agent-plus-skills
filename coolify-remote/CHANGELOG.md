@@ -4,6 +4,59 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.4.0 — 2026-05-01
+
+### Added
+
+- **`--wait` streaming progress (issue #1, Q3 row: L2 -> L3)** — `deploy --wait` now
+  prints each status change to stderr as it happens (poll-with-printing every 3s) instead of
+  silently blocking until a terminal state. Each stderr line is prefixed with elapsed seconds:
+  `[  5s] in_progress`, `[ 42s] finished`. This gives live feedback for long deployments
+  without requiring SSE support. Note: Coolify does expose SSE at
+  `/api/v1/deployments/{uuid}/logs` but the endpoint only streams raw log lines with no
+  structured status envelope; the polling approach surfaces the same status transitions
+  the UI shows, with no added complexity.
+
+- **Structured deployment error envelope (issue #2, Q1: L2 -> L3)** — when a deploy fails,
+  stdout now receives a JSON object with structured fields instead of a raw error blob:
+  - `error_code` -- short token from `status_reason` (or `"deploy_failed"`)
+  - `phase` -- `"build"` | `"push"` | `"runtime"` | `"unknown"`, inferred from
+    `status_reason` text and `[build]`/`[push]`/`[runtime]` markers in log entries
+  - `failed_step` -- last non-empty log line before the error (capped at 200 chars)
+  - `hint` -- phase-specific suggestion ("Check Dockerfile and build args...", etc.)
+  - `raw_error` -- original `status_reason` string for full fidelity
+
+- `_parse_deploy_error(dep_record)` -- public helper; extracts the structured error envelope
+  from any Coolify deployment dict. Handles both dict-shaped and string-shaped log entries.
+
+- `_wait_for_deployment(client, dep_uuid, *, timeout, poll_interval)` -- new internal
+  function that replaces the inline polling loop in `_deploy_and_maybe_wait`. Returns a
+  typed result dict (success / error / timeout / cancelled) with `_exit_nonzero` sentinel
+  on non-success paths, matching the pattern used in `hcloud-remote`.
+
+### Fixed
+
+- `_deploy_and_maybe_wait` referenced `args.timeout` from outer scope (would NameError at
+  runtime if called from `cmd_tls_enable` or `cmd_env_sync`). Fixed by accepting `timeout`
+  as an explicit parameter with a default of 600s. All callers updated.
+
+### Tests
+
+- `test/test_deploy_wait.py` (18 new tests): covers `_parse_deploy_error` (8 cases),
+  `_wait_for_deployment` (6 cases: happy, error, timeout, cancel, HTTP retry, dedup),
+  and `_deploy_and_maybe_wait` end-to-end integration (4 cases).
+
+### Known limitation
+
+- `skill-plus inquire --audit` Q1 (`errors_surface`) remains at Level 2 in the static
+  audit because the auditor has no CLI access to run `deployment logs` and verify its
+  output shape. The static probe detects `level` field filtering in the source and
+  classifies it as "filter on existing structured field (L2)". At runtime, `deployment
+  logs --json` returns per-finding structured records `{level, title, message, phase,
+  line, source}` which matches the L3 pattern. This is a probe/tooling gap, not a
+  missing capability. The `deployment logs` subcommand is the L3 implementation for
+  issue #2.
+
 ## 0.3.2 — 2026-04-30
 
 ### Changed

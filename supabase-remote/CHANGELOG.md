@@ -4,6 +4,38 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.5.0 - 2026-05-01
+
+### Added
+
+- **`projects create` subcommand** — `POST /v1/projects` to create a new Supabase
+  project. Required flags: `--name`, `--org-id`, `--db-pass`, `--region`. Optional:
+  `--plan` (default `free`). Returns the API response JSON immediately unless `--wait`
+  is passed. (Closes issue #1 Q3 row — project create L1 -> L2.)
+
+- **`projects restore` subcommand** — `POST /v1/projects/{ref}/restore` to resume a
+  paused project. Required flag: `--project`. Returns immediately unless `--wait` is
+  passed. (Closes issue #1 Q3 row — project restore L1 -> L2.)
+
+- **`--wait` / `--timeout` / `--poll-interval`** flags on both `projects create` and
+  `projects restore`. When `--wait` is set, the command blocks and polls
+  `GET /v1/projects/{ref}` on the given interval (default 10 s) until one of three
+  terminal outcomes:
+  - **success** — project status reaches `ACTIVE_HEALTHY`; emits final project JSON, exit 0.
+  - **error** — status reaches a failure state (`INIT_FAILED`, `RESTORE_FAILED`,
+    `INACTIVE`, `UNKNOWN`); emits result JSON, exit 1.
+  - **timeout** — `--timeout` seconds elapsed (default 600 s) without a terminal
+    state; emits result JSON, exit 1.
+
+- **`wait_project_active(ref, *, timeout, poll_interval, debug)`** internal helper —
+  the canonical polling implementation, testable in isolation. Mirrors the `wait_action`
+  shape from `hcloud-remote`.
+
+- DB migrations via `supabase db query` (the `sql` / `sql-inline` subcommands) are
+  **synchronous** at the Supabase API level — the CLI blocks until the migration
+  completes and returns results directly. No `--wait` added because there is no async
+  operation to poll.
+
 ## 0.4.0 - 2026-04-28
 
 ### Added

@@ -47,6 +47,37 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+# Deployment-wait constants. MIN_POLL_INTERVAL clamps user input so an
+# agent can't accidentally DDoS the Coolify API with poll_interval=0.
+WAIT_DEFAULT_TIMEOUT = 600
+WAIT_DEFAULT_POLL_INTERVAL = 3
+WAIT_MIN_POLL_INTERVAL = 2
+
+# Fields projected from the raw Coolify deployment record into wait-result
+# envelopes. Excludes `logs` because build logs can echo env-var values
+# and we don't want to leak those into the agent's context window. The
+# `deployment logs <uuid>` subcommand is the deliberate path to opt-in to
+# log retrieval.
+_DEPLOY_SAFE_FIELDS = (
+    "uuid", "status", "status_reason",
+    "created_at", "updated_at", "finished_at",
+    "commit", "commit_message", "branch", "git_type",
+    "application_id", "application_uuid", "deployment_url",
+    "is_webhook", "is_redeploy", "is_pr",
+)
+
+
+def _slim_deployment(dep_record: dict) -> dict:
+    """Project a Coolify deployment record to safe fields only.
+
+    Drops `logs` (may contain env vars echoed during build) and any other
+    field not on the allowlist. Returns an empty dict if input isn't a dict.
+    """
+    if not isinstance(dep_record, dict):
+        return {}
+    return {k: dep_record[k] for k in _DEPLOY_SAFE_FIELDS if k in dep_record}
+
+
 # ─── tool identity ────────────────────────────────────────────────────────────
 # Every JSON payload this tool emits carries a top-level `tool: {name, version}`
 # field so agents can self-diagnose version drift from the output alone — no
@@ -460,7 +491,7 @@ def cmd_env_set(client: CoolifyClient, args: argparse.Namespace) -> None:
             print("  (note: container needs redeploy to see new values — use --deploy)")
 
     if args.deploy:
-        _deploy_and_maybe_wait(client, app, wait=args.wait, force=True)
+        _deploy_and_maybe_wait(client, app, wait=args.wait, force=True, timeout=args.timeout)
 
 
 def cmd_env_sync(client: CoolifyClient, args: argparse.Namespace) -> None:
@@ -477,7 +508,7 @@ def cmd_env_sync(client: CoolifyClient, args: argparse.Namespace) -> None:
         status = _upsert_env(client, app["uuid"], k, v, args.preview)
         print(f"  set {k} (HTTP {status})")
     if args.deploy:
-        _deploy_and_maybe_wait(client, app, wait=args.wait, force=True)
+        _deploy_and_maybe_wait(client, app, wait=args.wait, force=True, timeout=args.timeout)
 
 
 def cmd_domain_set(client: CoolifyClient, args: argparse.Namespace) -> None:
@@ -494,16 +525,310 @@ def cmd_domain_set(client: CoolifyClient, args: argparse.Namespace) -> None:
         sys.exit(1)
     print(f"HTTP {status}: domain set to {args.url}")
     if args.deploy:
-        _deploy_and_maybe_wait(client, app, wait=args.wait, force=True)
+        _deploy_and_maybe_wait(client, app, wait=args.wait, force=True, timeout=args.timeout)
 
 
 def cmd_deploy(client: CoolifyClient, args: argparse.Namespace) -> None:
     app = client.resolve_app(args.app)
-    _deploy_and_maybe_wait(client, app, wait=args.wait, force=args.force)
+    _deploy_and_maybe_wait(client, app, wait=args.wait, force=args.force, timeout=args.timeout)
+
+
+def cmd_deploy_logs(client: CoolifyClient, args: argparse.Namespace) -> None:
+    """Fetch deployment logs and surface per-finding structured error records.
+
+    Calls GET /api/v1/deployments/{uuid}/logs (or falls back to
+    GET /api/v1/deployments/{uuid} and reads an embedded logs list).
+
+    Each log entry is returned as a structured record:
+      {level, title, message, phase, line, source, raw}
+
+    With --errors-only, only entries whose level is ``error`` or ``fatal``
+    are shown.  Default (no filter) shows all entries.
+
+    Output is a JSON array of finding records so downstream tooling (linters,
+    CI parsers) can process them without text parsing.  Non-JSON output is
+    also printed in human-readable form when --json is not set.
+    """
+    dep_uuid = args.deployment_uuid
+    # Try the dedicated logs endpoint first.
+    s, data = client.call("GET", f"/api/v1/deployments/{dep_uuid}/logs")
+    if s >= 300:
+        # Fall back to the deployment record itself, which may embed logs.
+        s2, data2 = client.call("GET", f"/api/v1/deployments/{dep_uuid}")
+        if s2 >= 300:
+            raise SystemExit(
+                f"Could not fetch logs: GET /logs HTTP {s}, GET deployment HTTP {s2}"
+            )
+        data = data2
+
+    # Normalise: Coolify may return a list of log objects, a dict with a
+    # ``logs`` list, or a dict with a ``data`` list.
+    raw_logs: list = []
+    if isinstance(data, list):
+        raw_logs = data
+    elif isinstance(data, dict):
+        raw_logs = (
+            data.get("logs")
+            or data.get("data")
+            or []
+        )
+
+    # Map each log entry to a structured finding record.
+    findings: list[dict[str, Any]] = []
+    phase_markers = {"build": "build", "push": "push", "runtime": "runtime", "start": "runtime"}
+    current_phase = "unknown"
+    for idx, entry in enumerate(raw_logs):
+        if isinstance(entry, str):
+            text = entry
+            raw_entry: dict[str, Any] = {"output": text}
+        elif isinstance(entry, dict):
+            text = (
+                entry.get("output")
+                or entry.get("log")
+                or entry.get("message")
+                or ""
+            )
+            raw_entry = entry
+        else:
+            continue
+
+        text_lower = text.lower()
+        for marker, mapped in phase_markers.items():
+            if f"[{marker}]" in text_lower or f":{marker}:" in text_lower:
+                current_phase = mapped
+
+        # Determine level from the entry itself or by heuristics on the text.
+        raw_level = (
+            raw_entry.get("level")
+            or raw_entry.get("type")
+            or raw_entry.get("severity")
+            or ""
+        ).lower()
+
+        if raw_level in ("error", "fatal", "critical"):
+            level = "error"
+        elif raw_level in ("warn", "warning"):
+            level = "warning"
+        elif raw_level in ("info", "debug", "trace"):
+            level = raw_level
+        elif any(kw in text_lower for kw in ("error:", "fatal:", "failed:", "exception:", "traceback")):
+            level = "error"
+        elif any(kw in text_lower for kw in ("warn:", "warning:")):
+            level = "warning"
+        else:
+            level = "info"
+
+        # title: first token of the message (truncated); message: full text.
+        words = text.split()
+        title = words[0].rstrip(".:,;") if words else "log_entry"
+        if len(title) > 48:
+            title = title[:48]
+
+        finding: dict[str, Any] = {
+            "level": level,
+            "title": title,
+            "message": text.strip(),
+            "phase": current_phase,
+            "line": idx,
+            "source": dep_uuid,
+        }
+        if args.include_raw:
+            finding["raw"] = raw_entry
+        findings.append(finding)
+
+    if args.errors_only:
+        findings = [f for f in findings if f["level"] in ("error", "fatal")]
+
+    if args.json:
+        _dump_json({"deployment_uuid": dep_uuid, "findings": findings})
+        return
+
+    print(f"Deployment {dep_uuid}: {len(findings)} log finding(s)")
+    for f in findings:
+        lvl_tag = f["level"].upper()[:5]
+        print(f"  [{f['phase']:8s}] [{lvl_tag:5s}] {f['message'][:120]}")
+
+
+def _parse_deploy_error(dep_record: dict) -> dict[str, Any]:
+    """Extract structured error fields from a failed deployment record.
+
+    Coolify deployment objects carry ``status_reason`` (a free-text string)
+    and the logs blob may contain stage markers like ``[build]``, ``[push]``,
+    ``[runtime]``.  We do a best-effort extraction so the caller gets a
+    structured envelope rather than the raw blob.
+
+    Returns a dict with keys:
+      error_code   -- short token derived from status_reason (or "deploy_failed")
+      phase        -- "build" | "push" | "runtime" | "unknown"
+      failed_step  -- last non-empty log line before the error, or None
+      hint         -- human-readable suggestion based on the phase
+      raw_error    -- the original status_reason string (may be None)
+    """
+    raw_error: str | None = dep_record.get("status_reason") or None
+
+    # Determine phase from the raw_error text or any ``logs`` list in the record.
+    phase = "unknown"
+    failed_step: str | None = None
+
+    # Check log lines for the last stage marker seen before failure.
+    logs = dep_record.get("logs") or []
+    if isinstance(logs, list):
+        phase_markers = {"build": "build", "push": "push", "runtime": "runtime", "start": "runtime"}
+        for entry in logs:
+            text = ""
+            if isinstance(entry, dict):
+                text = entry.get("output") or entry.get("log") or entry.get("message") or ""
+            elif isinstance(entry, str):
+                text = entry
+            text_lower = text.lower()
+            for marker, mapped in phase_markers.items():
+                if f"[{marker}]" in text_lower or f":{marker}:" in text_lower:
+                    phase = mapped
+            if text.strip():
+                failed_step = text.strip()[:200]  # cap at 200 chars
+
+    # Fallback: infer phase from raw_error string if logs gave nothing.
+    if phase == "unknown" and raw_error:
+        low = raw_error.lower()
+        if "build" in low:
+            phase = "build"
+        elif "push" in low or "registry" in low:
+            phase = "push"
+        elif "start" in low or "runtime" in low or "container" in low:
+            phase = "runtime"
+
+    # Derive a short error code from the first meaningful word of status_reason.
+    error_code = "deploy_failed"
+    if raw_error:
+        # Strip punctuation, take first token, lower-case.
+        token = raw_error.split()[0].lower().rstrip(".:,;") if raw_error.split() else ""
+        if token and token.isascii() and len(token) <= 32:
+            error_code = token
+
+    hint_map = {
+        "build": "Check Dockerfile and build args; see deployment logs for the failing step.",
+        "push": "Check registry credentials and image name in Coolify app settings.",
+        "runtime": "Container failed to start; inspect logs for runtime errors or missing env vars.",
+        "unknown": "Check the full deployment log in the Coolify UI for details.",
+    }
+    hint = hint_map.get(phase, hint_map["unknown"])
+    # `title` and `message` are canonical error-record fields recognised by
+    # tooling that processes structured error envelopes (linters, formatters).
+    # `level` is always "error" for deploy failures -- included so downstream
+    # processors can filter by severity without special-casing the status field.
+    return {
+        "level": "error",
+        "title": error_code,
+        "message": hint,
+        "error_code": error_code,
+        "phase": phase,
+        "failed_step": failed_step,
+        "hint": hint,
+        "raw_error": raw_error,
+    }
+
+
+def _wait_for_deployment(
+    client: CoolifyClient,
+    dep_uuid: str,
+    *,
+    timeout: int = WAIT_DEFAULT_TIMEOUT,
+    poll_interval: int = WAIT_DEFAULT_POLL_INTERVAL,
+) -> dict[str, Any]:
+    """Poll a Coolify deployment until terminal state, timeout, or error.
+
+    Streams status-change events to stderr as they happen so the caller can
+    see progress without waiting for the full deployment to finish.
+
+    Terminal states: ``finished`` (success), ``failed``, ``cancelled-by-user``,
+    ``cancelled-by-system``.
+
+    Returns a result dict:
+      On success:  {status: "finished", elapsed_s, deployment}
+      On failure:  {status: "failed", elapsed_s, deployment,
+                    error_code, phase, failed_step, hint, raw_error,
+                    _exit_nonzero: True}
+      On timeout:  {status: "timeout", elapsed_s, last_state,
+                    _exit_nonzero: True}
+      On cancel:   {status: "cancelled", cancel_reason, elapsed_s,
+                    _exit_nonzero: True}
+    """
+    terminal = {"finished", "failed", "cancelled-by-user", "cancelled-by-system"}
+    poll_interval = max(WAIT_MIN_POLL_INTERVAL, poll_interval)
+    last_state: str | None = None
+    last_dep: dict[str, Any] = {}
+    start = time.time()
+
+    print("Waiting for deployment to complete...", file=sys.stderr)
+
+    while True:
+        elapsed = int(time.time() - start)
+
+        if elapsed >= timeout:
+            print(
+                f"  [{elapsed:4d}s] TIMEOUT in state {last_state!r}",
+                file=sys.stderr,
+            )
+            return {
+                "status": "timeout",
+                "elapsed_s": elapsed,
+                "last_state": last_state,
+                "deployment_uuid": dep_uuid,
+                "_exit_nonzero": True,
+            }
+
+        s, d = client.call("GET", f"/api/v1/deployments/{dep_uuid}")
+        if s >= 300:
+            print(f"  [{elapsed:4d}s] poll error HTTP {s}", file=sys.stderr)
+            time.sleep(poll_interval)
+            continue
+
+        dep_record = d if isinstance(d, dict) else {}
+        state: str | None = dep_record.get("status")
+        if isinstance(state, str):
+            state = state.lower()
+
+        if state != last_state:
+            print(f"  [{elapsed:4d}s] {state}", file=sys.stderr)
+            last_state = state
+            last_dep = dep_record
+
+        if state in terminal:
+            elapsed_final = int(time.time() - start)
+            if state == "finished":
+                return {
+                    "status": "finished",
+                    "elapsed_s": elapsed_final,
+                    "deployment": _slim_deployment(dep_record),
+                }
+            # failed or cancelled
+            if state == "failed":
+                # _parse_deploy_error reads the full record (incl. logs) for
+                # phase/step inference but the emitted envelope uses the slim
+                # projection — keeps build-output secrets out of the result.
+                err_info = _parse_deploy_error(dep_record)
+                return {
+                    "status": "error",
+                    "elapsed_s": elapsed_final,
+                    "deployment": _slim_deployment(dep_record),
+                    "_exit_nonzero": True,
+                    **err_info,
+                }
+            # cancelled-by-user or cancelled-by-system
+            cancel_reason = dep_record.get("status_reason") or state
+            return {
+                "status": "cancelled",
+                "cancel_reason": cancel_reason,
+                "elapsed_s": elapsed_final,
+                "deployment": _slim_deployment(dep_record),
+                "_exit_nonzero": True,
+            }
+
+        time.sleep(poll_interval)
 
 
 def _deploy_and_maybe_wait(
-    client: CoolifyClient, app: dict, *, wait: bool, force: bool
+    client: CoolifyClient, app: dict, *, wait: bool, force: bool, timeout: int = 600
 ) -> None:
     status, data = client.call(
         "GET", "/api/v1/deploy", query={"uuid": app["uuid"], "force": "true" if force else "false"}
@@ -520,29 +845,13 @@ def _deploy_and_maybe_wait(
     if not wait or not dep_uuid:
         return
 
-    print("Waiting for deployment to finish…")
-    terminal = {"finished", "failed", "cancelled-by-user", "cancelled-by-system"}
-    last = None
-    start = time.time()
-    while True:
-        s, d = client.call("GET", f"/api/v1/deployments/{dep_uuid}")
-        if s >= 300:
-            print(f"  poll HTTP {s}: {d!r}", file=sys.stderr)
-            time.sleep(3)
-            continue
-        state = (d or {}).get("status") if isinstance(d, dict) else None
-        if state != last:
-            elapsed = int(time.time() - start)
-            print(f"  [{elapsed:4d}s] {state}")
-            last = state
-        if state in terminal:
-            if state == "finished":
-                return
-            sys.exit(1)
-        if time.time() - start > args.timeout:
-            print(f"Timed out after {args.timeout}s in state {last!r}", file=sys.stderr)
-            sys.exit(1)
-        time.sleep(3)
+    result = _wait_for_deployment(client, dep_uuid, timeout=timeout)
+    if result.get("_exit_nonzero"):
+        # Emit structured error envelope to stdout so the caller can parse it.
+        _dump_json(result)
+        sys.exit(1)
+    # Success -- emit the final state.
+    _dump_json(result)
 
 
 def cmd_tls_enable(client: CoolifyClient, args: argparse.Namespace) -> None:
@@ -564,7 +873,7 @@ def cmd_tls_enable(client: CoolifyClient, args: argparse.Namespace) -> None:
         sys.exit(1)
 
     print("[2/4] Triggering deploy")
-    _deploy_and_maybe_wait(client, app, wait=True, force=True)
+    _deploy_and_maybe_wait(client, app, wait=True, force=True, timeout=args.timeout)
 
     print("[3/4] Waiting for Let's Encrypt cert provisioning (up to 120s)")
     # Coolify proxies request a cert on first hit; poll the HTTPS endpoint.
@@ -798,6 +1107,32 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--wait", action="store_true", help="Block until deployment finishes")
     sp.add_argument("--timeout", type=int, default=600)
     sp.set_defaults(func=cmd_deploy)
+
+    # deployment — inspect existing deployments
+    dep_top = sub.add_parser("deployment", help="Inspect existing deployments")
+    dep_sub = dep_top.add_subparsers(dest="deployment_cmd", required=True)
+
+    # deployment logs <uuid>
+    dl = dep_sub.add_parser(
+        "logs",
+        help="Fetch structured per-finding log records for a deployment UUID",
+    )
+    dl.add_argument(
+        "deployment_uuid",
+        help="Deployment UUID (from `deploy <app>` output or `app show` last deployment)",
+    )
+    dl.add_argument(
+        "--errors-only",
+        action="store_true",
+        help="Show only error/fatal level findings",
+    )
+    dl.add_argument(
+        "--include-raw",
+        action="store_true",
+        help="Include the raw log entry object in each finding",
+    )
+    dl.add_argument("--json", action="store_true", help="Emit JSON array of findings")
+    dl.set_defaults(func=cmd_deploy_logs)
 
     # server
     sp = sub.add_parser("server", help="Manage servers")

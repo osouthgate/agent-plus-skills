@@ -55,12 +55,21 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 DEFAULT_ADMIN_USER = "admin@example.com"
+
+# Cron-wait constants.
+# Hermes cron jobs can run for seconds or many minutes depending on the
+# agent prompt and model. Default timeout is generous; poll interval is
+# short enough to notice completion quickly without hammering the server.
+WAIT_DEFAULT_TIMEOUT = 600       # seconds
+WAIT_DEFAULT_POLL_INTERVAL = 5   # seconds
+WAIT_MIN_POLL_INTERVAL = 2       # floor — prevents poll_interval=0 hammering
 
 
 # ──────────────────────────── tool identity ────────────────────────────
@@ -412,6 +421,82 @@ class HermesClient:
         except json.JSONDecodeError:
             return status, raw
 
+    def wait_cron_run(
+        self,
+        job_id: str,
+        baseline_completed: int,
+        *,
+        timeout: int,
+        poll_interval: int,
+    ) -> dict[str, Any]:
+        """Poll GET /api/cron/jobs until the named job's completed-run count
+        increments past *baseline_completed* (indicating the triggered run
+        finished), or until timeout.
+
+        Hermes does not expose per-run execution IDs, so we track the
+        ``repeat.completed`` counter as a proxy for "one more run finished".
+
+        Return shapes (all include ``job_id`` and ``elapsed_s``):
+
+        - success:  ``{status: "success", completed_runs, job, elapsed_s}``
+        - timeout:  ``{status: "timeout", last_state, elapsed_s, _exit_nonzero: True}``
+        - error:    ``{status: "poll_error", error, elapsed_s, _exit_nonzero: True}``
+        """
+        poll = max(WAIT_MIN_POLL_INTERVAL, poll_interval)
+        start = time.monotonic()
+        last: dict[str, Any] = {}
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= timeout:
+                return {
+                    "status": "timeout",
+                    "job_id": job_id,
+                    "last_state": last or None,
+                    "elapsed_s": int(elapsed),
+                    "_exit_nonzero": True,
+                }
+            try:
+                status, data = self.call("GET", "/api/cron/jobs")
+            except Exception as exc:
+                return {
+                    "status": "poll_error",
+                    "job_id": job_id,
+                    "error": str(exc),
+                    "elapsed_s": int(time.monotonic() - start),
+                    "_exit_nonzero": True,
+                }
+            if status >= 300 or not isinstance(data, list):
+                return {
+                    "status": "poll_error",
+                    "job_id": job_id,
+                    "error": f"HTTP {status}",
+                    "elapsed_s": int(time.monotonic() - start),
+                    "_exit_nonzero": True,
+                }
+            job = next(
+                (j for j in data if j.get("id") == job_id or j.get("name") == job_id),
+                None,
+            )
+            if job is None:
+                return {
+                    "status": "poll_error",
+                    "job_id": job_id,
+                    "error": f"job {job_id!r} disappeared during wait",
+                    "elapsed_s": int(time.monotonic() - start),
+                    "_exit_nonzero": True,
+                }
+            last = job
+            completed = job.get("repeat", {}).get("completed", 0)
+            if completed > baseline_completed:
+                return {
+                    "status": "success",
+                    "job_id": job_id,
+                    "completed_runs": completed,
+                    "job": job,
+                    "elapsed_s": int(time.monotonic() - start),
+                }
+            time.sleep(poll)
+
 
 # ─── pretty printers ──────────────────────────────────────────────────────────
 
@@ -564,8 +649,40 @@ def cmd_cron_resume(client: HermesClient, args: argparse.Namespace) -> None:
 
 
 def cmd_cron_trigger(client: HermesClient, args: argparse.Namespace) -> None:
+    # Snapshot the current completed-run count before triggering so we can
+    # detect when *this* run finishes (Hermes has no per-run execution IDs).
+    baseline_completed: int = 0
+    if getattr(args, "wait", False):
+        _, jobs = client.call("GET", "/api/cron/jobs")
+        if isinstance(jobs, list):
+            job = next(
+                (j for j in jobs if j.get("id") == args.id or j.get("name") == args.id),
+                None,
+            )
+            if job is None:
+                raise SystemExit(f"No cron job with id or name {args.id!r}")
+            baseline_completed = job.get("repeat", {}).get("completed", 0)
+
     status, data = client.call("POST", f"/api/cron/jobs/{args.id}/trigger")
-    print(f"HTTP {status}: triggered {args.id}")
+    if status >= 300:
+        print(f"HTTP {status}: trigger failed", file=sys.stderr)
+        _dump_json(data)
+        sys.exit(1)
+
+    if not getattr(args, "wait", False):
+        print(f"HTTP {status}: triggered {args.id}")
+        return
+
+    # --wait: block until the completed count increments.
+    result = client.wait_cron_run(
+        args.id,
+        baseline_completed,
+        timeout=args.timeout,
+        poll_interval=args.poll_interval,
+    )
+    _dump_json(result)
+    if result.get("_exit_nonzero"):
+        sys.exit(1)
 
 
 def cmd_cron_remove(client: HermesClient, args: argparse.Namespace) -> None:
@@ -813,6 +930,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     ct = cron_sub.add_parser("trigger", help="Trigger a cron job on next tick")
     ct.add_argument("id")
+    ct.add_argument(
+        "--wait",
+        action="store_true",
+        default=False,
+        help=(
+            "Block until the triggered run completes, then print final-state JSON. "
+            "Exits non-zero on timeout or poll error. "
+            "Uses repeat.completed as a completion proxy (Hermes has no per-run IDs)."
+        ),
+    )
+    ct.add_argument(
+        "--timeout",
+        type=int,
+        default=WAIT_DEFAULT_TIMEOUT,
+        metavar="SECONDS",
+        help=f"Max seconds to wait (default: {WAIT_DEFAULT_TIMEOUT}). Only used with --wait.",
+    )
+    ct.add_argument(
+        "--poll-interval",
+        type=int,
+        default=WAIT_DEFAULT_POLL_INTERVAL,
+        dest="poll_interval",
+        metavar="SECONDS",
+        help=(
+            f"Poll interval in seconds (default: {WAIT_DEFAULT_POLL_INTERVAL}, "
+            f"min: {WAIT_MIN_POLL_INTERVAL}). Only used with --wait."
+        ),
+    )
     ct.set_defaults(func=cmd_cron_trigger)
 
     cd = cron_sub.add_parser("remove", help="Delete a cron job")

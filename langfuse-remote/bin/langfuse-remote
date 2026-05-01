@@ -18,6 +18,12 @@ Subcommands:
   list-user-traces <uid>     List recent traces for a user (--limit, --from/to-timestamp)
   list-user-sessions <uid>   List recent sessions for a user
   monitor-user <uid>         One-shot user summary: metrics + sessions + latest trace + ERRORs
+  resolve-trace <id-or-name>
+                             Resolve a trace by UUID or name (returns most-recent match)
+  resolve-session <id-or-name>
+                             Resolve a session by exact ID or ID-prefix
+  resolve-project <id-or-name>
+                             Resolve a project by UUID or case-insensitive name
 
 Configuration (per-instance):
   LANGFUSE_BASE_URL      (default active instance)
@@ -42,6 +48,16 @@ Or a JSON config file at $LANGFUSE_CONFIG (default ~/.config/langfuse/instances.
       "dev-ollie": {...}
     }
   }
+
+NOTE — --wait / async ingestion:
+  The Langfuse public ingestion endpoint (POST /api/public/ingestion) is a
+  fire-and-forget batch bus: it returns HTTP 207 immediately once the payload is
+  acknowledged, then processes events asynchronously server-side.  No action-ID
+  or job-ID is returned, so there is nothing to poll. A --wait flag on
+  `trace-ping` (or any future ingest command) cannot be implemented faithfully
+  and is therefore intentionally absent. If you need confirmation that a trace
+  was indexed, use `get-traces <id>` after a short delay — it will return
+  not_found until processing completes (usually < 2 s on cloud).
 """
 
 from __future__ import annotations
@@ -59,6 +75,9 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+# ──────────────────────────── helpers ────────────────────────────
 
 
 # ──────────────────────────── tool identity ────────────────────────────
@@ -317,6 +336,180 @@ def api_post(inst: dict, path: str, payload: dict) -> tuple[int, dict | str]:
         return code, json.loads(body or b"{}")
     except Exception:
         return code, body.decode("utf-8", "replace")
+
+
+# ──────────────────────────── name / id resolvers ────────────────────────────
+#
+# Resolvers accept either a UUID/opaque-ID string or a human-readable name and
+# return the full API object.  They follow the same shape as hcloud-remote's
+# resolve_image / resolve_server:
+#   - If the input looks like an ID (non-empty, no spaces) AND matches directly
+#     via the by-ID endpoint, return it.
+#   - Otherwise use `?name=` filter (or list-and-filter where Langfuse does not
+#     support ?name=) and surface the known names on miss.
+#
+# Langfuse endpoint notes:
+#   GET /api/public/traces?name=    — supported (v3+, returns paginated list)
+#   GET /api/public/sessions        — no ?name= filter; filter client-side by id prefix
+#   GET /api/public/projects        — list-only endpoint, no ?id= or ?name= filter;
+#                                     filter client-side
+#
+# Session note: Langfuse sessions do not have a user-visible "name" field — the
+# session ID itself is the identifier.  The resolver therefore accepts either a
+# full ID or a case-insensitive prefix, returning the first match from a list
+# scan.
+
+_HEX_CHARS = frozenset("0123456789abcdefABCDEF-")
+
+
+def _looks_like_uuid(s: str) -> bool:
+    """Return True if *s* is shaped like a UUID (32 or 36 hex chars with at least
+    one alpha hex digit). Pure-numeric strings of length 32 are dispatched via
+    list-and-filter so they don't accidentally trigger UUID lookups."""
+    if len(s) not in (32, 36):
+        return False
+    if not all(c in _HEX_CHARS for c in s):
+        return False
+    return any(c in "abcdefABCDEF" for c in s)
+
+
+def _resolve_trace(inst: dict, id_or_name: str) -> dict:
+    """Resolve a trace by UUID or by name.
+
+    First tries GET /api/public/traces/{id} (exact ID lookup).  If the response
+    is 404 OR the input does not look like a UUID, falls back to a
+    GET /api/public/traces?name= filter and returns the most recent match.
+
+    On miss, raises RuntimeError listing known trace names (up to 20).
+    """
+    # Try direct ID lookup first (fast path for UUID inputs).
+    if _looks_like_uuid(id_or_name):
+        code, resp = api_get_optional(inst, f"/api/public/traces/{id_or_name}")
+        if code == 200 and isinstance(resp, dict):
+            return resp
+        if code not in (404,):
+            snippet = resp if isinstance(resp, str) else json.dumps(resp)
+            raise RuntimeError(f"GET traces/{id_or_name} -> {code}: {snippet[:200]}")
+
+    # Name lookup via ?name= filter.
+    try:
+        body = api_get(inst, "/api/public/traces", {"name": id_or_name, "limit": 10})
+    except RuntimeError as exc:
+        raise RuntimeError(f"trace name lookup failed: {exc}") from exc
+
+    data = body.get("data") or []
+    if data:
+        # Return the most-recent match (list is newest-first from Langfuse).
+        return data[0]
+
+    # Miss: collect known names for a helpful error.
+    try:
+        all_body = api_get(inst, "/api/public/traces", {"limit": 20})
+        known = sorted({t.get("name") for t in (all_body.get("data") or []) if t.get("name")})
+    except Exception:
+        known = []
+    names_str = ", ".join(known) or "(none)"
+    raise RuntimeError(f"No trace matching {id_or_name!r}. Known names (up to 20): {names_str}")
+
+
+def _resolve_session(inst: dict, id_or_name: str) -> dict:
+    """Resolve a session by exact ID or by ID prefix.
+
+    Langfuse sessions have no user-visible name field; the session ID is the
+    human handle.  This resolver:
+      1. Tries GET /api/public/sessions/{id} directly (exact match).
+      2. On 404, lists sessions (up to 50) and returns the first whose ID starts
+         with `id_or_name` (case-insensitive prefix match).
+
+    On miss, raises RuntimeError listing known session IDs (up to 20).
+    """
+    # Direct ID lookup.
+    code, resp = api_get_optional(inst, f"/api/public/sessions/{id_or_name}")
+    if code == 200 and isinstance(resp, dict):
+        return resp
+    if code not in (404,):
+        snippet = resp if isinstance(resp, str) else json.dumps(resp)
+        raise RuntimeError(f"GET sessions/{id_or_name} -> {code}: {snippet[:200]}")
+
+    # Prefix / partial-name fallback: list sessions and scan.
+    try:
+        body = api_get(inst, "/api/public/sessions", {"limit": 50})
+    except RuntimeError as exc:
+        raise RuntimeError(f"session list failed: {exc}") from exc
+
+    rows = body.get("data") or []
+    needle = id_or_name.lower()
+    for row in rows:
+        sid = (row.get("id") or "").lower()
+        if sid == needle or sid.startswith(needle):
+            # Fetch the full session object (list rows are minimal).
+            code2, resp2 = api_get_optional(inst, f"/api/public/sessions/{row['id']}")
+            if code2 == 200 and isinstance(resp2, dict):
+                return resp2
+            return row
+
+    known = sorted(r.get("id") or "" for r in rows if r.get("id"))[:20]
+    names_str = ", ".join(known) or "(none)"
+    raise RuntimeError(f"No session matching {id_or_name!r}. Known IDs (up to 20): {names_str}")
+
+
+def _resolve_project(inst: dict, id_or_name: str) -> dict:
+    """Resolve a project by UUID or by name.
+
+    Langfuse exposes GET /api/public/projects (list-only; no ?name= or ?id=
+    filter).  This resolver lists all projects and matches by exact ID or
+    case-insensitive name.
+
+    On miss, raises RuntimeError listing known project names.
+    """
+    try:
+        body = api_get(inst, "/api/public/projects")
+    except RuntimeError as exc:
+        raise RuntimeError(f"project list failed: {exc}") from exc
+
+    projects = body.get("data") or []
+    needle = id_or_name.lower()
+    # Exact ID match first, then name match.
+    for p in projects:
+        if (p.get("id") or "").lower() == needle:
+            return p
+    for p in projects:
+        if (p.get("name") or "").lower() == needle:
+            return p
+
+    known = sorted(p.get("name") or p.get("id") or "" for p in projects)
+    names_str = ", ".join(known) or "(none)"
+    raise RuntimeError(f"No project matching {id_or_name!r}. Known projects: {names_str}")
+
+
+def cmd_resolve_trace(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    try:
+        obj = _resolve_trace(inst, args.id_or_name)
+    except RuntimeError as e:
+        die(str(e), 2)
+    _emit_json(args, obj)
+    return 0
+
+
+def cmd_resolve_session(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    try:
+        obj = _resolve_session(inst, args.id_or_name)
+    except RuntimeError as e:
+        die(str(e), 2)
+    _emit_json(args, obj)
+    return 0
+
+
+def cmd_resolve_project(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    try:
+        obj = _resolve_project(inst, args.id_or_name)
+    except RuntimeError as e:
+        die(str(e), 2)
+    _emit_json(args, obj)
+    return 0
 
 
 # ──────────────────────────── prompts ────────────────────────────
@@ -982,6 +1175,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=5, help="Sessions to include (default 5)")
     sp.add_argument("--pretty", action="store_true")
     sp.set_defaults(func=cmd_monitor_user)
+
+    # ── name / id resolvers ───────────────────────────────────────────────────
+    sp = sub.add_parser(
+        "resolve-trace",
+        help="Resolve a trace by UUID or name; returns full trace JSON",
+    )
+    sp.add_argument("id_or_name", help="Trace UUID or name (returns most-recent match on name)")
+    sp.add_argument("--pretty", action="store_true", help="Indent JSON output")
+    sp.set_defaults(func=cmd_resolve_trace)
+
+    sp = sub.add_parser(
+        "resolve-session",
+        help="Resolve a session by exact ID or ID prefix; returns full session JSON",
+    )
+    sp.add_argument("id_or_name", help="Session ID (exact or prefix)")
+    sp.add_argument("--pretty", action="store_true", help="Indent JSON output")
+    sp.set_defaults(func=cmd_resolve_session)
+
+    sp = sub.add_parser(
+        "resolve-project",
+        help="Resolve a project by UUID or name; returns project JSON",
+    )
+    sp.add_argument("id_or_name", help="Project UUID or name (case-insensitive)")
+    sp.add_argument("--pretty", action="store_true", help="Indent JSON output")
+    sp.set_defaults(func=cmd_resolve_project)
 
     # whoami (refresh_handler target)
     sp = sub.add_parser(
