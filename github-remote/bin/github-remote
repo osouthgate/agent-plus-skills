@@ -988,6 +988,416 @@ def build_overview(owner: str, repo: str, ref: str, cfg: dict[str, str]) -> dict
     }
 
 
+# ──────────────────────────── ci errors ────────────────────────────
+#
+# Structured CI failure extraction. Replaces the regex-grep-on-raw-logs
+# pattern (run logs --errors-only) with GitHub's first-class annotations
+# API: every check-run has zero or more annotations carrying a level
+# (failure/warning/notice), file path, line range, title, and message.
+#
+# Hybrid REST + GraphQL strategy:
+#   - REST list endpoint gives `output.annotations_count` per check-run for
+#     free — used as a cheap pre-filter to skip runs with no annotations.
+#   - When the total annotations across filtered runs is small (< 40,
+#     comfortably under GraphQL's 50 silent-fail cap), use a single batched
+#     GraphQL query — one HTTP call instead of N REST calls.
+#   - Otherwise fall back to per-check-run REST pagination (50/page hard cap).
+#   - --prefer-rest forces REST regardless (operational escape hatch).
+#
+# MSYS gotcha: Git Bash on Windows rewrites POSIX-absolute path arguments
+# passed to native executables (gh becomes confused if we pass `/repos/...`).
+# We avoid the leading slash on `gh api` calls and use base+path for direct
+# urllib calls (which are not affected). All API paths in this module start
+# with `/` because they go through `_api()` which uses urllib directly, not
+# subprocess to gh.
+
+# Hard cap from GitHub's REST annotations endpoint (also the silent-fail
+# threshold for GraphQL annotations field — anything above returns null).
+CI_ANNOTATIONS_PAGE_CAP = 50
+# Safety margin under the GraphQL silent-fail cap.
+CI_GRAPHQL_TOTAL_THRESHOLD = 40
+# Default cap on annotations returned (overridable via --limit).
+CI_DEFAULT_LIMIT = 200
+# Conclusions we treat as "failed" for the purposes of inquiry.
+CI_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required"})
+
+
+def _resolve_to_check_runs(
+    owner: str, repo: str, ref: str, cfg: dict[str, str],
+) -> dict[str, Any]:
+    """Resolve `<ref>` to a list of check-runs with annotations_count populated.
+
+    Accepts:
+      - numeric run-id (workflow run) → check-runs for that run's head_sha
+      - branch name → latest workflow run on that branch → check-runs
+      - PR number (numeric, but disambiguated from run-id by trying PR first
+        when the value is small; we prefer PR resolution for small numbers
+        and fall back to run-id) → head SHA → check-runs
+      - commit SHA (40-char hex) → check-runs for that commit
+
+    Returns:
+      {
+        "kind": "branch|pr|commit|run",
+        "value": <resolved ref>,
+        "head_sha": "...",
+        "run_ids": [...],
+        "check_runs": [...],   # raw check-run dicts (incl. output.annotations_count)
+      }
+    """
+    # 40-char hex → commit SHA.
+    if re.fullmatch(r"[0-9a-fA-F]{40}", ref):
+        head_sha = ref.lower()
+        return {
+            "kind": "commit",
+            "value": head_sha,
+            "head_sha": head_sha,
+            "run_ids": _runs_for_sha(owner, repo, head_sha, cfg),
+            "check_runs": _check_runs_for_sha(owner, repo, head_sha, cfg),
+        }
+
+    if _is_int(ref):
+        n = int(ref)
+        # R11 fix: PR-vs-run-id disambiguation. Always try PR first regardless
+        # of integer magnitude. Large repos can have PR numbers > 100000 (e.g.
+        # microsoft/vscode is at >170000), so the prior numeric-threshold
+        # heuristic produced false-negatives. One extra round-trip on the
+        # ambiguous case beats incorrect routing on a popular repo.
+        try:
+            pr = _api(f"/repos/{owner}/{repo}/pulls/{n}", cfg=cfg)
+            head_sha = (pr.get("head") or {}).get("sha") or ""
+            if head_sha:
+                return {
+                    "kind": "pr",
+                    "value": n,
+                    "head_sha": head_sha,
+                    "run_ids": _runs_for_sha(owner, repo, head_sha, cfg),
+                    "check_runs": _check_runs_for_sha(owner, repo, head_sha, cfg),
+                }
+        except GitHubError:
+            pass  # not a PR — fall through to run-id
+        # Treat as run-id.
+        run = _api(f"/repos/{owner}/{repo}/actions/runs/{n}", cfg=cfg)
+        head_sha = run.get("head_sha") or ""
+        return {
+            "kind": "run",
+            "value": n,
+            "head_sha": head_sha,
+            "run_ids": [n],
+            "check_runs": _check_runs_for_sha(owner, repo, head_sha, cfg) if head_sha else [],
+        }
+
+    # Branch name.
+    latest = _latest_run_for_branch(owner, repo, ref, cfg)
+    head_sha = (latest or {}).get("head_sha") or ""
+    return {
+        "kind": "branch",
+        "value": ref,
+        "head_sha": head_sha,
+        "run_ids": [latest["id"]] if latest and latest.get("id") else [],
+        "check_runs": _check_runs_for_sha(owner, repo, head_sha, cfg) if head_sha else [],
+    }
+
+
+def _runs_for_sha(owner: str, repo: str, sha: str, cfg: dict[str, str]) -> list[int]:
+    resp = _api(
+        f"/repos/{owner}/{repo}/actions/runs",
+        query={"head_sha": sha, "per_page": "20"},
+        cfg=cfg,
+    )
+    runs = resp.get("workflow_runs", []) if isinstance(resp, dict) else []
+    return [r["id"] for r in runs if r.get("id")]
+
+
+def _check_runs_for_sha(owner: str, repo: str, sha: str, cfg: dict[str, str]) -> list[dict[str, Any]]:
+    resp = _api(
+        f"/repos/{owner}/{repo}/commits/{sha}/check-runs",
+        query={"per_page": "100"},
+        cfg=cfg,
+    )
+    return resp.get("check_runs", []) if isinstance(resp, dict) else []
+
+
+def _fetch_annotations_rest(
+    owner: str, repo: str, check_run_id: int, cfg: dict[str, str],
+    *, max_pages: int = 10,
+) -> list[dict[str, Any]]:
+    """REST per-check-run annotations with pagination. 50/page hard cap."""
+    out: list[dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        resp = _api(
+            f"/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations",
+            query={"per_page": str(CI_ANNOTATIONS_PAGE_CAP), "page": str(page)},
+            cfg=cfg,
+        )
+        items = resp if isinstance(resp, list) else []
+        if not items:
+            break
+        out.extend(items)
+        if len(items) < CI_ANNOTATIONS_PAGE_CAP:
+            break
+    return out
+
+
+def _fetch_annotations_graphql(
+    owner: str, repo: str, check_run_node_ids: list[str], cfg: dict[str, str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Batch annotations across multiple check-runs via GraphQL.
+
+    Returns: {check_run_node_id: [annotation, ...]}.
+
+    Silent-fail caveat: GraphQL returns null for annotations when count > 50.
+    Caller must pre-filter to keep total under CI_GRAPHQL_TOTAL_THRESHOLD.
+    """
+    if not check_run_node_ids:
+        return {}
+    # Build batched query with aliased nodes.
+    aliases = []
+    for i, _nid in enumerate(check_run_node_ids):
+        aliases.append(f"""
+        cr{i}: node(id: $id{i}) {{
+          ... on CheckRun {{
+            id
+            annotations(first: {CI_ANNOTATIONS_PAGE_CAP}) {{
+              nodes {{
+                annotationLevel
+                path
+                location {{ start {{ line }} end {{ line }} }}
+                title
+                message
+                rawDetails
+              }}
+            }}
+          }}
+        }}""")
+    var_decls = ", ".join(f"$id{i}: ID!" for i in range(len(check_run_node_ids)))
+    query = f"query Batch({var_decls}) {{{''.join(aliases)}}}"
+    variables = {f"id{i}": nid for i, nid in enumerate(check_run_node_ids)}
+    resp = _api(
+        "/graphql",
+        method="POST",
+        body={"query": query, "variables": variables},
+        cfg=cfg,
+    )
+    data = (resp or {}).get("data") if isinstance(resp, dict) else None
+    out: dict[str, list[dict[str, Any]]] = {}
+    if not isinstance(data, dict):
+        return out
+    for i, nid in enumerate(check_run_node_ids):
+        node = data.get(f"cr{i}") or {}
+        anns_block = node.get("annotations") or {}
+        nodes = anns_block.get("nodes") or []
+        out[nid] = nodes if isinstance(nodes, list) else []
+    return out
+
+
+def _normalize_annotation_rest(ann: dict[str, Any], cr: dict[str, Any]) -> dict[str, Any]:
+    """REST annotation → standard envelope record."""
+    return {
+        "run_id": _check_run_to_run_id(cr),
+        "job_id": cr.get("id"),
+        "job_name": cr.get("name"),
+        "job_url": cr.get("html_url"),
+        "level": ann.get("annotation_level"),
+        "path": ann.get("path"),
+        "start_line": ann.get("start_line"),
+        "end_line": ann.get("end_line"),
+        "title": ann.get("title"),
+        "message": ann.get("message"),
+        "raw_details": ann.get("raw_details"),
+        "source": "annotation",
+    }
+
+
+def _normalize_annotation_graphql(ann: dict[str, Any], cr: dict[str, Any]) -> dict[str, Any]:
+    """GraphQL annotation node → standard envelope record."""
+    loc = ann.get("location") or {}
+    start = (loc.get("start") or {}).get("line")
+    end = (loc.get("end") or {}).get("line")
+    level = ann.get("annotationLevel")
+    if isinstance(level, str):
+        level = level.lower()
+    return {
+        "run_id": _check_run_to_run_id(cr),
+        "job_id": cr.get("id"),
+        "job_name": cr.get("name"),
+        "job_url": cr.get("html_url"),
+        "level": level,
+        "path": ann.get("path"),
+        "start_line": start,
+        "end_line": end,
+        "title": ann.get("title"),
+        "message": ann.get("message"),
+        "raw_details": ann.get("rawDetails"),
+        "source": "annotation",
+    }
+
+
+def _check_run_to_run_id(cr: dict[str, Any]) -> Optional[int]:
+    """Extract workflow run id from a check-run record. The REST list-for-sha
+    endpoint includes details_url like
+    https://github.com/owner/repo/actions/runs/<id>/job/<jobid> — the source
+    of truth. Fall back to None if it can't be parsed."""
+    url = cr.get("details_url") or cr.get("html_url") or ""
+    m = re.search(r"/actions/runs/(\d+)", url)
+    return int(m.group(1)) if m else None
+
+
+def ci_errors(
+    owner: str, repo: str, ref: str,
+    *,
+    include_levels: set[str],
+    include_logs: bool,
+    limit: int,
+    prefer_rest: bool,
+    cfg: dict[str, str],
+) -> dict[str, Any]:
+    """Build the structured ci-errors payload. See spec in module docstring."""
+    resolved = _resolve_to_check_runs(owner, repo, ref, cfg)
+    check_runs = resolved["check_runs"]
+
+    # Filter to failing check-runs that actually have annotations.
+    failed_runs = [
+        cr for cr in check_runs
+        if cr.get("conclusion") in CI_FAILED_CONCLUSIONS
+    ]
+    runs_with_annotations = [
+        cr for cr in failed_runs
+        if int(((cr.get("output") or {}).get("annotations_count") or 0)) > 0
+    ]
+    runs_without_annotations = [
+        cr for cr in failed_runs
+        if int(((cr.get("output") or {}).get("annotations_count") or 0)) == 0
+    ]
+    total_annotation_count = sum(
+        int(((cr.get("output") or {}).get("annotations_count") or 0))
+        for cr in runs_with_annotations
+    )
+
+    # Decide path: GraphQL batch when total fits comfortably under cap;
+    # REST per-check-run otherwise; --prefer-rest always forces REST.
+    use_graphql = (
+        not prefer_rest
+        and runs_with_annotations
+        and total_annotation_count < CI_GRAPHQL_TOTAL_THRESHOLD
+        and all(cr.get("node_id") for cr in runs_with_annotations)
+    )
+    source_used = "graphql" if use_graphql else "rest" if runs_with_annotations else "none"
+
+    annotations: list[dict[str, Any]] = []
+
+    if use_graphql:
+        node_id_to_cr = {cr["node_id"]: cr for cr in runs_with_annotations}
+        anns_by_id = _fetch_annotations_graphql(owner, repo, list(node_id_to_cr.keys()), cfg)
+        for nid, anns in anns_by_id.items():
+            cr = node_id_to_cr.get(nid) or {}
+            for a in anns:
+                annotations.append(_normalize_annotation_graphql(a, cr))
+    else:
+        for cr in runs_with_annotations:
+            cr_id = cr.get("id")
+            if not cr_id:
+                continue
+            try:
+                anns = _fetch_annotations_rest(owner, repo, cr_id, cfg)
+            except GitHubError as e:
+                # Surface failure without aborting the whole inquiry.
+                annotations.append({
+                    "run_id": _check_run_to_run_id(cr),
+                    "job_id": cr_id,
+                    "job_name": cr.get("name"),
+                    "job_url": cr.get("html_url"),
+                    "level": "failure",
+                    "title": "annotation_fetch_error",
+                    "message": str(e)[:200],
+                    "source": "annotation",
+                })
+                continue
+            for a in anns:
+                annotations.append(_normalize_annotation_rest(a, cr))
+
+    # Apply level filter.
+    annotations = [a for a in annotations if (a.get("level") or "failure") in include_levels]
+
+    # Apply --limit cap.
+    capped = False
+    if len(annotations) > limit:
+        annotations = annotations[:limit]
+        capped = True
+
+    # Log fallback for failing jobs with zero annotations.
+    log_fallback: list[dict[str, Any]] = []
+    if include_logs and runs_without_annotations:
+        # We need actual job IDs (from /actions/runs/<run_id>/jobs), not check-run IDs.
+        # check-run id != job id in general; the jobs endpoint returns the canonical job records.
+        seen_run_ids: set[int] = set()
+        for cr in runs_without_annotations:
+            run_id = _check_run_to_run_id(cr)
+            if run_id is None or run_id in seen_run_ids:
+                continue
+            seen_run_ids.add(run_id)
+            try:
+                jobs_resp = _api(f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs", cfg=cfg)
+            except GitHubError:
+                continue
+            jobs = jobs_resp.get("jobs", []) if isinstance(jobs_resp, dict) else []
+            # Match jobs by name to the check-run's name.
+            target_name = cr.get("name")
+            matching_jobs = [j for j in jobs if j.get("name") == target_name and j.get("conclusion") in CI_FAILED_CONCLUSIONS]
+            if not matching_jobs:
+                # Fall back: any failing job from this run.
+                matching_jobs = [j for j in jobs if j.get("conclusion") in CI_FAILED_CONCLUSIONS]
+            for j in matching_jobs:
+                jid = j.get("id")
+                if not jid:
+                    continue
+                try:
+                    raw = _fetch_job_logs(owner, repo, jid, cfg)
+                except GitHubError:
+                    continue
+                raw = _scrub_text(raw or "")
+                err_lines = [
+                    ln for ln in raw.splitlines()
+                    if re.search(r"\b(error|failed|fatal|traceback|exception)\b", ln, re.IGNORECASE)
+                ]
+                # Cap log lines per job to keep the envelope manageable.
+                for ln in err_lines[-50:]:
+                    log_fallback.append({
+                        "run_id": run_id,
+                        "job_id": jid,
+                        "job_name": j.get("name"),
+                        "level": "failure",
+                        "source": "log",
+                        "line": ln,
+                    })
+
+    # Summary.
+    by_level: dict[str, int] = {"failure": 0, "warning": 0, "notice": 0}
+    for a in annotations:
+        lvl = a.get("level") or "failure"
+        by_level[lvl] = by_level.get(lvl, 0) + 1
+    jobs_with_annotations = len({a.get("job_id") for a in annotations if a.get("job_id")})
+    jobs_with_only_logs = len({l.get("job_id") for l in log_fallback if l.get("job_id")})
+
+    return {
+        "ref": ref,
+        "resolved": {
+            "kind": resolved["kind"],
+            "value": resolved["value"],
+            "run_ids": resolved["run_ids"],
+        },
+        "summary": {
+            "total_annotations": len(annotations),
+            "by_level": by_level,
+            "jobs_with_annotations": jobs_with_annotations,
+            "jobs_with_only_logs": jobs_with_only_logs,
+            "source_used": source_used,
+            "capped": capped,
+        },
+        "annotations": annotations,
+        "log_fallback": log_fallback,
+    }
+
+
 # ──────────────────────────── emit ────────────────────────────
 
 
@@ -1361,6 +1771,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sov.add_argument("ref", help="branch name or PR number")
 
+    # ci
+    sci = sub.add_parser("ci", help="CI inquiry (errors)")
+    sci_sub = sci.add_subparsers(dest="action", required=True)
+    scie = sci_sub.add_parser(
+        "errors",
+        description=(
+            "Structured CI failure extraction. Pulls per-finding annotations "
+            "from check-runs (REST or batched GraphQL — auto-selected on volume) "
+            "rather than grep-scraping raw job logs.\n\n"
+            "<ref> accepts: branch name, PR number, commit SHA (40-char hex), "
+            "or workflow run-id.\n\n"
+            "Example:\n  github-remote ci errors main --pretty\n"
+            "  github-remote ci errors 498 --include warning,notice --limit 50\n"
+            "  github-remote ci errors a1b2c3...deadbeef --include-logs --format jsonl"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    scie.add_argument("ref", help="branch, PR number, commit SHA, or run-id")
+    scie.add_argument("--include", default="failure",
+                      help="comma-separated levels to include (failure,warning,notice). default: failure")
+    scie.add_argument("--format", choices=["json", "jsonl"], default="json",
+                      help="json (default, full envelope) | jsonl (one annotation per line)")
+    scie.add_argument("--include-logs", action="store_true",
+                      help="for failing jobs with 0 annotations, regex-grep job logs as a fallback")
+    scie.add_argument("--limit", type=int, default=CI_DEFAULT_LIMIT,
+                      help=f"cap on annotations returned (default {CI_DEFAULT_LIMIT})")
+    scie.add_argument("--prefer-rest", action="store_true",
+                      help="force REST per-check-run path (skip GraphQL batch)")
+
     # whoami (refresh_handler target)
     swh = sub.add_parser(
         "whoami",
@@ -1443,6 +1882,45 @@ def main(argv: Optional[list[str]] = None) -> int:
                 emit_json(result, pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
                 if exit_nonzero:
                     return 1
+
+        elif args.cmd == "ci":
+            if args.action == "errors":
+                raw_levels = [s.strip().lower() for s in (args.include or "").split(",") if s.strip()]
+                valid = {"failure", "warning", "notice"}
+                bad = [lv for lv in raw_levels if lv not in valid]
+                if bad:
+                    die(f"--include: unknown level(s) {bad} (valid: failure, warning, notice)")
+                include_levels = set(raw_levels) or {"failure"}
+                payload = ci_errors(
+                    owner, repo, args.ref,
+                    include_levels=include_levels,
+                    include_logs=args.include_logs,
+                    limit=args.limit,
+                    prefer_rest=args.prefer_rest,
+                    cfg=cfg,
+                )
+                if args.format == "jsonl":
+                    output_path = getattr(args, "output", None)
+                    annotations = payload.get("annotations", [])
+                    if output_path:
+                        path = Path(output_path).expanduser().resolve()
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        with path.open("w", encoding="utf-8") as fh:
+                            for a in annotations:
+                                fh.write(json.dumps(_scrub(a), default=str) + "\n")
+                        emit_json({
+                            "payloadPath": str(path),
+                            "payloadType": "jsonl",
+                            "payloadLength": len(annotations),
+                        }, pretty=args.pretty)
+                    else:
+                        # jsonl: one annotation per line, no envelope.
+                        for a in annotations:
+                            print(json.dumps(_scrub(a), default=str))
+                else:
+                    emit_json(payload, pretty=args.pretty,
+                              output=getattr(args, "output", None),
+                              shape_depth=getattr(args, "shape_depth", 3))
 
         elif args.cmd == "overview":
             emit_json(build_overview(owner, repo, args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))

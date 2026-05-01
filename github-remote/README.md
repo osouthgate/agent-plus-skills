@@ -14,6 +14,7 @@ Without this, an agent investigating a PR chains three to four `gh` calls — `g
 - **Name-resolved.** `pr resolve feat/google-drive-connector` replaces the `gh pr list --head <branch> --json number,url,title` + manual-ID-extraction pattern seen 9+ times in transcripts. Ambiguity never auto-picks — exits non-zero with up to 10 candidates so the agent can re-query.
 - **`run wait` polls on a branch or a run ID.** 30-min default timeout matches real CI (GH Actions routinely exceeds 10-15 min). On timeout: non-zero exit with partial JSON including last-known state. No hand-rolled `until curl ... | jq ...` loops (which break on the Windows bash shim anyway).
 - **Token leakage is impossible.** Every API response walks through `_scrub()` — redacts `token`, `password`, `authorization`, `client_secret`, `private_key`, `webhook_url_with_secret`, and related keys. Free-text log output from `run logs` is regex-scrubbed for `ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`, AWS `AKIA…`, and generic `Bearer …` patterns. A canary no-leak test asserts a known secret substring cannot appear on any output path.
+- **`ci errors <ref>` returns structured per-finding annotations** (path, line, level, title, message) from check-runs — pulled via the annotations API, not regex-scraped from raw job logs. Hybrid REST + batched GraphQL: small result sets get one GraphQL call; large result sets fall back to REST per-check-run pagination. `--include-logs` adds a regex-grep log fallback for failing jobs that emit zero annotations. `--format jsonl` for `jq` piping.
 - **One write, no ocean.** `pr comment` is the only write in v1 — the most common agent write op in transcripts, narrow blast radius. `pr create`, `pr merge`, `issue create` are deliberately deferred.
 
 ## Install
@@ -98,6 +99,11 @@ github-remote run logs 24187042542 --errors-only --tail 100
 
 # Wait on a run, or on the latest run for a branch
 github-remote run wait main --timeout 1800 --poll-interval 10
+
+# Structured CI failures (annotations API, not raw-log grep)
+github-remote ci errors main --pretty
+github-remote ci errors 498 --include warning,notice --limit 50
+github-remote ci errors deadbeefcafe1234567890abcdef1234567890ab --include-logs --format jsonl
 
 # Issues
 github-remote issue list --state open --label bug --limit 20

@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.5.0 - 2026-05-01
+
+### Added
+- `ci errors <ref>` subcommand — structured CI failure extraction via GitHub's check-run annotations API (path, line range, level, title, message) instead of regex-grepping raw job logs. `<ref>` accepts branch name, PR number, commit SHA (40-char hex), or workflow run-id. Hybrid strategy: when the total annotation count across failing check-runs is under 40 (safety margin under GraphQL's 50 silent-fail cap), one batched GraphQL query fetches them all; otherwise REST per-check-run pagination kicks in. `--prefer-rest` forces the REST path as an operational escape hatch. `--include warning,notice` widens beyond `failure`-only. `--include-logs` falls back to regex-grep on job logs for failing jobs that emit zero annotations (with `source: "log"` discriminator on the records). `--limit 200` (default) caps the annotation list. `--format jsonl` emits one annotation per line for `jq` piping. `--output PATH` follows the framework standard (full payload to disk, summary envelope to stdout). Sibling to `run logs` — does not replace it.
+
 ## 0.4.0 - 2026-04-28
 
 ### Added
