@@ -1,7 +1,7 @@
 {
   "name": "hcloud-remote",
   "description": "Minimal CLI for Hetzner Cloud day-to-day ops — list/show servers, reboot, snapshot, ssh. Resolves servers by name so you never copy IDs around, and prints IPv4/IPv6 cleanly without the Python heredoc dance that breaks on Windows.",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "agent_plus_version": ">=0.7",
   "refresh_handler": {
     "command": "hcloud-remote whoami --json",

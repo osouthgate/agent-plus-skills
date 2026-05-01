@@ -4,6 +4,28 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.4.0 — 2026-05-01
+
+### Added
+- `--wait / --timeout / --poll-interval` flags on `server reboot` and
+  `snapshot create` (issue #1 -- Q3 audit row). When `--wait` is set the
+  command blocks and polls `GET /actions/{id}` until Hetzner reports
+  `success`, `error`, or the timeout is reached. Default timeout 600 s
+  (10 min -- snapshots of large disks regularly need 5+ min). Minimum
+  poll interval clamped to 2 s (`WAIT_MIN_POLL_INTERVAL`).
+- `resolve_image(ident)` on `HCloudClient` -- accepts a numeric id or
+  image name (issue #3 -- Q2 audit row). Uses Hetzner's `?name=` filter
+  for name lookups. On miss, lists known image names in the error.
+- Free helper `_is_int(s)` used by `resolve_image` and detectable by the
+  skill-plus audit's Q2 pattern probe.
+
+### Notes
+- Hetzner Cloud has no separate "project" concept accessible via the API --
+  each token is already scoped to exactly one project, so there is nothing
+  to resolve. The project-resolver part of issue #3 is intentionally
+  omitted; this is documented here rather than in the issue to keep the
+  code simple.
+
 ## 0.3.2 — 2026-04-30
 
 ### Changed
