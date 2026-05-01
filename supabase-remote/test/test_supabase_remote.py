@@ -863,5 +863,314 @@ class TestWhoami(unittest.TestCase):
         self.assertEqual(out["tool"]["name"], "supabase-remote")
 
 
+# ─────────────────────── wait_project_active + cmd_projects_create/restore ──────
+
+
+class TestWaitProjectActive(unittest.TestCase):
+    """Unit tests for wait_project_active — all HTTP mocked, no real sleeps."""
+
+    def _call(self, statuses: list, *, timeout: float = 60, poll_interval: float = 0.001):
+        """Drive wait_project_active through a sequence of API responses.
+
+        `statuses` is a list of strings (project status values) or
+        Exception subclasses to raise. The mock cycles through them in order,
+        repeating the last one if the list is exhausted.
+        """
+        responses = iter(statuses)
+        last_resp = [statuses[-1]]
+
+        def _fake_fetch(ref, *, debug=False):
+            resp = next(responses, last_resp[0])
+            if isinstance(resp, type) and issubclass(resp, Exception):
+                raise SystemExit("poll error")
+            return {"id": ref, "status": resp}
+
+        with patch.object(sr, "_fetch_project", side_effect=_fake_fetch):
+            with patch.object(sr.time, "sleep", return_value=None):
+                return sr.wait_project_active(
+                    "testref123",
+                    timeout=timeout,
+                    poll_interval=poll_interval,
+                    debug=False,
+                )
+
+    def test_immediate_active_healthy(self) -> None:
+        result = self._call(["ACTIVE_HEALTHY"])
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["project_status"], "ACTIVE_HEALTHY")
+        self.assertNotIn("_exit_nonzero", result)
+
+    def test_coming_up_then_active(self) -> None:
+        result = self._call(["COMING_UP", "COMING_UP", "ACTIVE_HEALTHY"])
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn("_exit_nonzero", result)
+
+    def test_fail_status_returns_error(self) -> None:
+        result = self._call(["COMING_UP", "INIT_FAILED"])
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["project_status"], "INIT_FAILED")
+        self.assertTrue(result.get("_exit_nonzero"))
+
+    def test_restore_failed_status(self) -> None:
+        result = self._call(["COMING_UP", "RESTORE_FAILED"])
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(result.get("_exit_nonzero"))
+
+    def test_timeout_before_terminal(self) -> None:
+        """If timeout=0 the loop exits immediately without polling."""
+        result = sr.wait_project_active(
+            "refxxx",
+            timeout=0,
+            poll_interval=0.001,
+            debug=False,
+        )
+        self.assertEqual(result["status"], "timeout")
+        self.assertTrue(result.get("_exit_nonzero"))
+
+    def test_poll_error_returns_poll_error(self) -> None:
+        def _raise(ref, *, debug=False):
+            raise SystemExit("network down")
+
+        with patch.object(sr, "_fetch_project", side_effect=_raise):
+            with patch.object(sr.time, "sleep", return_value=None):
+                result = sr.wait_project_active(
+                    "refyyy", timeout=30, poll_interval=0.001
+                )
+        self.assertEqual(result["status"], "poll_error")
+        self.assertTrue(result.get("_exit_nonzero"))
+
+
+class TestCmdProjectsCreate(unittest.TestCase):
+    """cmd_projects_create — happy path, no-wait, and --wait fail/timeout."""
+
+    FAKE_PROJECT = {
+        "id": "newproject12345ref0",
+        "name": "my-project",
+        "status": "COMING_UP",
+        "region": "eu-west-1",
+    }
+
+    def _run(self, extra_argv: list, api_responses: list | None = None,
+             wait_result: dict | None = None):
+        """Invoke `projects create` through the parser with mocked _api_call."""
+        argv = [
+            "projects", "create",
+            "--name", "my-project",
+            "--org-id", "org_abc",
+            "--db-pass", "s3cr3t",
+            "--region", "eu-west-1",
+        ] + extra_argv
+
+        parser = sr.build_parser()
+        args = parser.parse_args(argv)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def _fake_api_call(method, path, **kwargs):
+            return (201, self.FAKE_PROJECT)
+
+        with patch.object(sr, "_api_call", side_effect=_fake_api_call):
+            if wait_result is not None:
+                with patch.object(sr, "wait_project_active", return_value=dict(wait_result)):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        try:
+                            args.func(args)
+                            exit_code = 0
+                        except SystemExit as e:
+                            exit_code = e.code if isinstance(e.code, int) else 1
+            else:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    try:
+                        args.func(args)
+                        exit_code = 0
+                    except SystemExit as e:
+                        exit_code = e.code if isinstance(e.code, int) else 1
+
+        return stdout.getvalue(), stderr.getvalue(), exit_code
+
+    def test_no_wait_returns_api_response(self) -> None:
+        out, _err, code = self._run([])
+        self.assertEqual(code, 0)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["id"], "newproject12345ref0")
+        self.assertEqual(parsed["status"], "COMING_UP")
+
+    def test_wait_success(self) -> None:
+        wait_ok = {
+            "status": "success",
+            "project_status": "ACTIVE_HEALTHY",
+            "ref": "newproject12345ref0",
+            "elapsed_s": 15,
+            "project": {"id": "newproject12345ref0", "status": "ACTIVE_HEALTHY"},
+        }
+        out, _err, code = self._run(["--wait"], wait_result=wait_ok)
+        self.assertEqual(code, 0)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["status"], "success")
+
+    def test_wait_error_exits_1(self) -> None:
+        wait_fail = {
+            "status": "error",
+            "project_status": "INIT_FAILED",
+            "ref": "newproject12345ref0",
+            "elapsed_s": 5,
+            "project": {"id": "newproject12345ref0", "status": "INIT_FAILED"},
+            "_exit_nonzero": True,
+        }
+        out, _err, code = self._run(["--wait"], wait_result=wait_fail)
+        self.assertEqual(code, 1)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["status"], "error")
+        # _exit_nonzero must be stripped before JSON emission
+        self.assertNotIn("_exit_nonzero", parsed)
+
+    def test_wait_timeout_exits_1(self) -> None:
+        wait_timeout = {
+            "status": "timeout",
+            "project_status": "COMING_UP",
+            "ref": "newproject12345ref0",
+            "elapsed_s": 600,
+            "project": None,
+            "_exit_nonzero": True,
+        }
+        out, _err, code = self._run(["--wait"], wait_result=wait_timeout)
+        self.assertEqual(code, 1)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["status"], "timeout")
+        self.assertNotIn("_exit_nonzero", parsed)
+
+
+class TestCmdProjectsRestore(unittest.TestCase):
+    """cmd_projects_restore — no-wait and --wait paths."""
+
+    FAKE_RESTORE_RESP = {"message": "restoring"}
+    FAKE_PROJECTS = [
+        {"id": "restoreme1234567890a", "name": "paused-proj", "region": "us-east-1"}
+    ]
+
+    def _run(self, extra_argv: list, wait_result: dict | None = None):
+        argv = ["projects", "restore", "--project", "paused-proj"] + extra_argv
+        parser = sr.build_parser()
+        args = parser.parse_args(argv)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def _fake_api_call(method, path, **kwargs):
+            return (200, self.FAKE_RESTORE_RESP)
+
+        with patch.object(sr, "_resolve_project_ref",
+                          return_value="restoreme1234567890a"):
+            with patch.object(sr, "_api_call", side_effect=_fake_api_call):
+                if wait_result is not None:
+                    with patch.object(sr, "wait_project_active",
+                                      return_value=dict(wait_result)):
+                        with redirect_stdout(stdout), redirect_stderr(stderr):
+                            try:
+                                args.func(args)
+                                exit_code = 0
+                            except SystemExit as e:
+                                exit_code = e.code if isinstance(e.code, int) else 1
+                else:
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        try:
+                            args.func(args)
+                            exit_code = 0
+                        except SystemExit as e:
+                            exit_code = e.code if isinstance(e.code, int) else 1
+
+        return stdout.getvalue(), stderr.getvalue(), exit_code
+
+    def test_no_wait_returns_api_response(self) -> None:
+        out, _err, code = self._run([])
+        self.assertEqual(code, 0)
+        parsed = json.loads(out)
+        self.assertIn("message", parsed)
+
+    def test_wait_success(self) -> None:
+        wait_ok = {
+            "status": "success",
+            "project_status": "ACTIVE_HEALTHY",
+            "ref": "restoreme1234567890a",
+            "elapsed_s": 30,
+            "project": {"id": "restoreme1234567890a", "status": "ACTIVE_HEALTHY"},
+        }
+        out, _err, code = self._run(["--wait"], wait_result=wait_ok)
+        self.assertEqual(code, 0)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["status"], "success")
+
+    def test_wait_error_exits_1(self) -> None:
+        wait_fail = {
+            "status": "error",
+            "project_status": "RESTORE_FAILED",
+            "ref": "restoreme1234567890a",
+            "elapsed_s": 10,
+            "project": {"id": "restoreme1234567890a", "status": "RESTORE_FAILED"},
+            "_exit_nonzero": True,
+        }
+        out, _err, code = self._run(["--wait"], wait_result=wait_fail)
+        self.assertEqual(code, 1)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["status"], "error")
+        self.assertNotIn("_exit_nonzero", parsed)
+
+
+class TestArgparseProjectsCreateRestore(unittest.TestCase):
+    """Argparse wiring for the new subcommands."""
+
+    def test_create_required_args(self) -> None:
+        parser = sr.build_parser()
+        args = parser.parse_args([
+            "projects", "create",
+            "--name", "foo",
+            "--org-id", "org_123",
+            "--db-pass", "pass",
+            "--region", "us-east-1",
+        ])
+        self.assertEqual(args.name, "foo")
+        self.assertEqual(args.org_id, "org_123")
+        self.assertEqual(args.db_pass, "pass")
+        self.assertEqual(args.region, "us-east-1")
+        self.assertEqual(args.plan, "free")
+        self.assertFalse(args.wait)
+        self.assertEqual(args.timeout, sr.WAIT_DEFAULT_TIMEOUT)
+        self.assertEqual(args.poll_interval, sr.WAIT_DEFAULT_POLL_INTERVAL)
+
+    def test_create_wait_flag(self) -> None:
+        parser = sr.build_parser()
+        args = parser.parse_args([
+            "projects", "create",
+            "--name", "x",
+            "--org-id", "y",
+            "--db-pass", "z",
+            "--region", "r",
+            "--wait",
+            "--timeout", "120",
+            "--poll-interval", "5",
+        ])
+        self.assertTrue(args.wait)
+        self.assertEqual(args.timeout, 120.0)
+        self.assertEqual(args.poll_interval, 5.0)
+
+    def test_restore_required_args(self) -> None:
+        parser = sr.build_parser()
+        args = parser.parse_args(["projects", "restore", "--project", "myprojname"])
+        self.assertEqual(args.project, "myprojname")
+        self.assertFalse(args.wait)
+
+    def test_restore_wait_flag(self) -> None:
+        parser = sr.build_parser()
+        args = parser.parse_args([
+            "projects", "restore",
+            "--project", "myprojname",
+            "--wait",
+            "--timeout", "300",
+        ])
+        self.assertTrue(args.wait)
+        self.assertEqual(args.timeout, 300.0)
+
+
 if __name__ == "__main__":
     unittest.main()
