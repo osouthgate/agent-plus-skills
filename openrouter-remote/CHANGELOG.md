@@ -29,6 +29,17 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Notes
+
+- **Issue #1 (Q3: --wait on provisioning operations) — n/a**: All OpenRouter
+  `/api/v1/keys*` mutations (POST, PATCH, DELETE) are fully synchronous: the
+  HTTP response already contains the final state. There is no async action queue,
+  no action-ID polling endpoint, and no background task to wait for — contrast
+  Hetzner Cloud where server creation returns an action_id that must be polled.
+  Implementing `--wait` would be a no-op wrapper around calls that complete in
+  the same HTTP round-trip; it is omitted rather than fabricated. The `models`
+  surface is read-only (GET only), so it is equally inapplicable there.
+
 ### Added
 - `models endpoints <id>` — per-provider endpoints from `GET /api/v1/models/{id}/endpoints`. Shows provider, quantization (fp16/bf16/fp8/int8/unknown), context length, `throughput_last_30m` (tokens/sec), `latency_last_30m`, `uptime_last_30m`, and per-provider input/output pricing. Sort by `throughput`, `latency`, `price-in`, `price-out`, `uptime`, `context`, or `name`. Motivation: the bulk `/models` list only exposes `top_provider`, but the same model id is often served by 5-10+ providers with different prices and quants — this is where the real routing decision lives. [2026-04-23]
 
