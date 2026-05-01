@@ -49,7 +49,7 @@ jobs:
             cp -r "$plugin_dir" "plugins/$name"
           done
           # Framework plugins (companion repo).
-          for p in agent-plus repo-analyze diff-summary skill-feedback; do
+          for p in agent-plus-meta repo-analyze diff-summary skill-feedback; do
             if [ -d "framework/$p" ] && [ ! -d "plugins/$p" ]; then
               cp -r "framework/$p" "plugins/$p"
             fi
@@ -59,4 +59,4 @@ jobs:
         env:
           AGENT_PLUS_PLUGINS_DIR: ${{ github.workspace }}/plugins
         run: |
-          python -m unittest framework/agent-plus/test/contract/test_envelope_contract.py -v
+          python -m unittest discover -s framework/agent-plus-meta/test/contract -p "test_envelope_contract.py" -v
