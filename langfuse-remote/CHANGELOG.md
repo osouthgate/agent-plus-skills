@@ -4,6 +4,30 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.6.0 — 2026-05-01
+
+- **Issue #4 (Q2): name/ID resolvers** — added three new subcommands so agents
+  no longer need to know Langfuse UUIDs in advance:
+  - `resolve-trace <id-or-name>` — resolves by UUID (direct GET) or by name
+    (`?name=` filter, returns most-recent match).
+  - `resolve-session <id-or-name>` — resolves by exact session ID or by
+    case-insensitive ID-prefix (Langfuse sessions have no user-visible name
+    field; the ID itself is the human handle).
+  - `resolve-project <id-or-name>` — resolves by UUID or case-insensitive name
+    from `GET /api/public/projects` (list-and-filter; no server-side filter
+    available on this endpoint).
+  - All resolvers follow the canonical pattern from hcloud-remote: try direct
+    ID lookup first, fall back to filter/list, surface known names on miss.
+  - Added `_looks_like_uuid` helper (rejects pure-numeric strings to avoid false-positive ID lookups).
+- **Issue #1 (Q3): --wait on ingestion** — The Langfuse public ingestion
+  endpoint (`POST /api/public/ingestion`) is fire-and-forget at the API level:
+  it returns HTTP 207 immediately upon acknowledging the batch, then processes
+  events asynchronously with no action-ID or job-ID in the response. There is
+  nothing to poll, so `--wait` cannot be implemented faithfully and is
+  intentionally absent. This is documented in the module docstring. To confirm
+  a trace was indexed after `trace-ping`, use `get-traces <id>` after a short
+  delay (typically < 2 s on Langfuse Cloud).
+
 ## 0.5.0 — 2026-04-28
 
 - Added `whoami` subcommand: emits `{instances: [{name, host, default, source}], count, default}` for `agent-plus refresh` (framework 0.7+). Lists configured Langfuse instances with their hosts only — public/secret keys are never included. Soft failure: returns `{instances: [], error: ...}` and exit 0 when no instances are configured (env vars unset and config file missing). Sources: `LANGFUSE_BASE_URL/_PUBLIC_KEY/_SECRET_KEY`, prefixed env vars (`LANGFUSE_<NAME>_BASE_URL` etc.), and the JSON config file (default `~/.config/langfuse/instances.json`).
