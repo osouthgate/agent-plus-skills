@@ -1,151 +1,63 @@
 {
   "name": "agent-plus-skills",
-  "owner": "osouthgate",
-  "version": "0.1.0",
-  "agent_plus_version": ">=0.5",
-  "surface": "claude-code",
-  "skills": [
+  "owner": {
+    "name": "Oliver Southgate",
+    "url": "https://github.com/osouthgate"
+  },
+  "metadata": {
+    "description": "Remote CLI plugins for day-to-day ops against Coolify, GitHub, Hetzner Cloud, Hermes, Langfuse, Linear, OpenRouter, Railway, Supabase, and Vercel.",
+    "version": "0.1.0"
+  },
+  "plugins": [
     {
       "name": "coolify-remote",
-      "version": "0.3.2",
-      "path": "coolify-remote/",
-      "obviates": [
-        "deploy to coolify",
-        "set the env var on coolify",
-        "change the domain",
-        "enable https on coolify",
-        "redeploy the app",
-        "sync .env to coolify",
-        "coolify status"
-      ]
+      "source": "./coolify-remote",
+      "description": "Remote CLI for managing a Coolify instance over REST — apps, env vars (with post-set verification), domains, TLS, deploys with --wait. Collapses the common Coolify fumbles (wrong field names, UUID threading, manual polling) into one-liners."
     },
     {
       "name": "github-remote",
-      "version": "0.4.0",
-      "path": "github-remote/",
-      "obviates": [
-        "is this PR green",
-        "what's the state of <branch>",
-        "is this mergeable",
-        "why did CI fail",
-        "tail the failing job logs",
-        "wait for the run on <branch>",
-        "post a comment on PR <N>"
-      ]
+      "source": "./github-remote",
+      "description": "Read-first wrapper around the GitHub REST API — one-call PR/branch overviews (state + checks + reviews + runs), name-resolved PRs and issues, --wait on async flows, --json on lists. Zero token leakage. One write: pr comment."
     },
     {
       "name": "hcloud-remote",
-      "version": "0.3.2",
-      "path": "hcloud-remote/",
-      "obviates": [
-        "what's the IP of the hetzner box",
-        "ssh into the vps",
-        "reboot the vps",
-        "take a snapshot before risky work",
-        "list hetzner snapshots",
-        "hetzner server status"
-      ]
+      "source": "./hcloud-remote",
+      "description": "Minimal CLI for Hetzner Cloud day-to-day ops — list/show servers, reboot, snapshot, ssh. Resolves servers by name so you never copy IDs around, and prints IPv4/IPv6 cleanly without the Python heredoc dance that breaks on Windows."
     },
     {
       "name": "hermes-remote",
-      "version": "0.3.2",
-      "path": "hermes-remote/",
-      "obviates": [
-        "list the hermes crons",
-        "pause the hermes cron",
-        "trigger the gbrain sync cron",
-        "swap the hermes model",
-        "show hermes env",
-        "chat with hermes",
-        "what's on the remote hermes"
-      ]
+      "source": "./hermes-remote",
+      "description": "Remote CLI for managing a Hermes Agent deployment over REST — cron jobs, env, status, model. Works against any Hermes instance (Coolify, bare VPS, etc.)."
     },
     {
       "name": "langfuse-remote",
-      "version": "0.5.0",
-      "path": "langfuse-remote/",
-      "obviates": [
-        "list langfuse instances",
-        "send a trace to langfuse",
-        "export the langfuse prompts",
-        "migrate prompts to the new langfuse",
-        "check langfuse health",
-        "monitor langfuse user",
-        "fetch langfuse trace"
-      ]
+      "source": "./langfuse-remote",
+      "description": "Remote CLI for managing a Langfuse instance (cloud or self-hosted) — export/import prompts for backup and cross-env migration, smoke-test trace ingestion, health checks across multiple instances."
     },
     {
       "name": "linear-remote",
-      "version": "0.4.0",
-      "path": "linear-remote/",
-      "obviates": [
-        "add this to linear",
-        "create a linear issue",
-        "list linear issues",
-        "move this to In Review",
-        "linear project status",
-        "turn this doc into a linear issue",
-        "what's on <issue-id>"
-      ]
+      "source": "./linear-remote",
+      "description": "Read-first wrapper around the Linear GraphQL API. One-call issue context (comments + relations + state), name-resolved teams/projects/states/labels, --from-markdown turns design docs into issues, --wait on webhook-driven state transitions. Zero API-key leakage."
     },
     {
       "name": "openrouter-remote",
-      "version": "0.3.2",
-      "path": "openrouter-remote/",
-      "obviates": [
-        "what's my openrouter balance",
-        "show openrouter usage this month",
-        "what's the cheapest model with vision",
-        "find a free model with tools",
-        "list my openrouter keys",
-        "create a new openrouter key",
-        "disable the hermes key"
-      ]
+      "source": "./openrouter-remote",
+      "description": "CLI for OpenRouter — check balance, list/filter/compare models by price and capabilities, manage API keys via the provisioning endpoint. Designed for both interactive use from Claude Code and for Hermes cron jobs (balance alerts, usage summaries)."
     },
     {
       "name": "railway-ops",
-      "version": "0.6.0",
-      "path": "railway-ops/",
-      "obviates": [
-        "what's happening on railway",
-        "railway status",
-        "is the api up",
-        "why is staging broken",
-        "env vars on <service>",
-        "show me recent errors on <service>",
-        "railway overview"
-      ]
+      "source": "./railway-ops",
+      "description": "Read-first wrapper around the Railway CLI — single-call env overviews (services, deploy status, recent errors/warnings, env var NAMES-only) for fast incident triage. Zero env-var-value leakage."
     },
     {
       "name": "supabase-remote",
-      "version": "0.4.0",
-      "path": "supabase-remote/",
-      "obviates": [
-        "run this SQL on Supabase",
-        "apply the seed file",
-        "audit RLS",
-        "which tables don't have RLS",
-        "regenerate types",
-        "list Supabase projects",
-        "resolve project ref"
-      ]
+      "source": "./supabase-remote",
+      "description": "Remote CLI for day-to-day Supabase project ops — project list/resolve, SQL exec with JSON-envelope stripping and post-run row verification, RLS audit, TypeScript gen-types. Wraps the Management API + `supabase` CLI."
     },
     {
       "name": "vercel-remote",
-      "version": "0.4.0",
-      "path": "vercel-remote/",
-      "obviates": [
-        "what's happening on vercel",
-        "is prod up",
-        "vercel status",
-        "latest deployment on <project>",
-        "env vars on <project>",
-        "check domains on <project>",
-        "tail the logs on <deployment>",
-        "trigger a vercel deploy"
-      ]
+      "source": "./vercel-remote",
+      "description": "Read-first wrapper around the Vercel REST API — one-call project overviews (deployments, domains, env NAMES-only), name-resolved projects, --wait on async flows, --json on lists. Zero env-var-value leakage."
     }
-  ],
-  "homepage": "https://github.com/osouthgate/agent-plus-skills",
-  "license": "MIT"
+  ]
 }
